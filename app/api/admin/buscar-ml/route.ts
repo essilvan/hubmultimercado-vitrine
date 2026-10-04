@@ -24,14 +24,14 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const { query, autoSave = true } = body;
 
-    if (!query || typeof query !== "string" || !query.trim()) {
+    if (!query || typeof query !== "string" || !query.replace(/[\/\\]/g, ' ').replace(/\s+/g, ' ').trim()) {
       return NextResponse.json(
         { success: false, error: "Informe o código ou nome da peça para buscar (ex: SYL 1092 ou LUK 620 3268 00 HB20)." },
         { status: 400 }
       );
     }
 
-    const queryLimpa = query.trim();
+    const queryLimpa = query.replace(/[\/\\]/g, ' ').replace(/\s+/g, ' ').trim();
 
     // 1. Busca produto via API do Mercado Livre priorizando menor preço e Full
     const resultado = await buscarProdutoML(queryLimpa);

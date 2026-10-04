@@ -246,16 +246,16 @@ function deduzirCodigo(titulo: string, marca: string): string {
  * @param query Código ou descrição da peça (ex: "SYL 1092" ou "LUK 620 3268 00 HB20")
  */
 export async function buscarProdutoML(query: string): Promise<ProdutoMLExtraido | null> {
-  const queryLimpa = query.trim();
+  const queryLimpa = query.replace(/[\/\\]/g, ' ').replace(/\s+/g, ' ').trim();
   if (!queryLimpa) return null;
 
-  // 1. Consulta à API Oficial do Mercado Livre com ordenação por menor preço e Full
+  // 1. Consulta à API Oficial do Mercado Livre (tenta com Full primeiro; fallback automático para busca geral)
   try {
-    const apiUrl = `https://api.mercadolibre.com/sites/MLB/search?q=${encodeURIComponent(
+    let apiUrl = `https://api.mercadolibre.com/sites/MLB/search?q=${encodeURIComponent(
       queryLimpa
-    )}&shipping_highlighted=fulfillment&sort=price_asc&limit=5`;
+    )}&shipping_highlighted=fulfillment&limit=5`;
 
-    const res = await fetch(apiUrl, {
+    let res = await fetch(apiUrl, {
       headers: {
         "User-Agent":
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -264,28 +264,51 @@ export async function buscarProdutoML(query: string): Promise<ProdutoMLExtraido 
       next: { revalidate: 3600 },
     });
 
+    let results: MLSearchResultItem[] = [];
     if (res.ok) {
       const json = await res.json();
-      const results: MLSearchResultItem[] = json.results || [];
+      results = json.results || [];
+    }
 
-      // Seleciona o item com menor preço real válido (> 0) e permalink
-      const itensValidos = results.filter((it) => it && it.price > 0 && it.permalink);
-      const itemEscolhido = itensValidos[0];
+    // Se a consulta com fulfillment não encontrar itens válidos, faz busca geral sem filtro de fulfillment
+    const itensComFull = results.filter((it) => it && it.price > 0 && it.permalink);
+    if (itensComFull.length === 0) {
+      apiUrl = `https://api.mercadolibre.com/sites/MLB/search?q=${encodeURIComponent(
+        queryLimpa
+      )}&limit=5`;
 
-      if (itemEscolhido) {
-        return processarItemML(itemEscolhido, queryLimpa);
+      res = await fetch(apiUrl, {
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+          Accept: "application/json",
+        },
+        next: { revalidate: 3600 },
+      });
+
+      if (res.ok) {
+        const json = await res.json();
+        results = json.results || [];
       }
+    }
+
+    // Seleciona o item com preço válido e permalink
+    const itensValidos = results.filter((it) => it && it.price > 0 && it.permalink);
+    const itemEscolhido = itensValidos[0];
+
+    if (itemEscolhido) {
+      return processarItemML(itemEscolhido, queryLimpa);
     }
   } catch (err) {
     console.warn("Aviso na chamada direta da API do Mercado Livre:", err);
   }
 
-  // 2. Fallback de Segurança Inteligente com ordenação por menor preço e Full
+  // 2. Fallback de Segurança Inteligente: Tenta com Envio Full e faz fallback automático para busca geral
   try {
     const fallbackSlug = gerarSlug(queryLimpa);
 
-    // Tenta primeiro filtrar por Envio Full e Menor Preço (_OrderId_PRICE_ASC_Envio_Full)
-    let searchUrl = `https://lista.mercadolivre.com.br/${fallbackSlug}_OrderId_PRICE_ASC_Envio_Full`;
+    // Tenta primeiro filtrar por Envio Full
+    let searchUrl = `https://lista.mercadolivre.com.br/${fallbackSlug}_Envio_Full`;
     let htmlRes = await fetch(searchUrl, {
       headers: {
         "User-Agent": "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
@@ -297,9 +320,9 @@ export async function buscarProdutoML(query: string): Promise<ProdutoMLExtraido 
     let html = htmlRes.ok ? await htmlRes.text() : "";
     let allHrefs = [...html.matchAll(/href=["'](https:\/\/[^"']*(?:mercadolivre\.com\.br\/[^\/]+\/up\/MLBU|produto\.mercadolivre\.com\.br\/MLB-|mercadolivre\.com\.br\/p\/MLB)[^"']*)["']/gi)].map(m => m[1]);
 
-    // Se o filtro estrito de Full não tiver produtos, busca ordenado por menor preço
+    // Fallback automático para busca geral caso o filtro Full não encontre anúncios
     if (allHrefs.length === 0) {
-      searchUrl = `https://lista.mercadolivre.com.br/${fallbackSlug}_OrderId_PRICE_ASC`;
+      searchUrl = `https://lista.mercadolivre.com.br/${fallbackSlug}`;
       htmlRes = await fetch(searchUrl, {
         headers: {
           "User-Agent": "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
