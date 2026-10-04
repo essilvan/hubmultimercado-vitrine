@@ -52,10 +52,17 @@ export async function GET(request: NextRequest) {
         {
           headers: {
             "User-Agent":
-              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            Accept: "application/json",
+            "Accept-Language": "pt-BR,pt;q=0.9",
           },
+          next: { revalidate: 60 },
         }
       );
+
+      if (res.status === 429 || res.status === 403) {
+        console.error("Bloqueio/Rate Limit ML:", res.statusText || `${res.status}`);
+      }
 
       if (res.ok) {
         const json = await res.json();

@@ -241,6 +241,13 @@ function deduzirCodigo(titulo: string, marca: string): string {
   return marca && marca !== "Auto Peças" ? `${marca}-COD` : "COD-ML";
 }
 
+const ML_API_HEADERS = {
+  "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+  Accept: "application/json",
+  "Accept-Language": "pt-BR,pt;q=0.9",
+};
+
 /**
  * Consulta a API do Mercado Livre buscando pelo menor preço real com entrega Full
  * @param query Código ou descrição da peça (ex: "SYL 1092" ou "LUK 620 3268 00 HB20")
@@ -249,20 +256,35 @@ export async function buscarProdutoML(query: string): Promise<ProdutoMLExtraido 
   const queryLimpa = query.replace(/[\/\\_\-]/g, ' ').replace(/\s+/g, ' ').trim();
   if (!queryLimpa) return null;
 
+  let erroBloqueioOuRateLimit: string | null = null;
+  let erroDetalhadoApi: string | null = null;
+
   // 1. Consulta à API Oficial do Mercado Livre (tenta com Full primeiro; fallback automático para busca geral)
   try {
-    let apiUrl = `https://api.mercadolibre.com/sites/MLB/search?q=${encodeURIComponent(
-      queryLimpa
-    )}&shipping_highlighted=fulfillment&limit=5`;
+    const queryEncoded = encodeURIComponent(queryLimpa);
+    let apiUrl = `https://api.mercadolibre.com/sites/MLB/search?q=${queryEncoded}&shipping_highlighted=fulfillment&limit=5`;
 
     let res = await fetch(apiUrl, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        Accept: "application/json",
-      },
-      next: { revalidate: 3600 },
+      headers: ML_API_HEADERS,
+      next: { revalidate: 60 },
     });
+
+    if (res.status === 429 || res.status === 403) {
+      console.error("Bloqueio/Rate Limit ML:", res.statusText || `${res.status}`);
+      erroBloqueioOuRateLimit = "Limite temporário de consultas da API atingido. Aguarde 30 segundos ou use a aba 'Por Link Direto'";
+    } else if (!res.ok) {
+      let detalhe = "";
+      try {
+        const errJson = await res.json();
+        detalhe = errJson.message || errJson.error || JSON.stringify(errJson);
+      } catch {
+        try {
+          detalhe = await res.text();
+        } catch {}
+      }
+      console.error("Erro na API do Mercado Livre:", res.status, detalhe);
+      erroDetalhadoApi = detalhe ? `Erro API ML (${res.status}): ${detalhe}` : `Erro API ML (Status ${res.status})`;
+    }
 
     let results: MLSearchResultItem[] = [];
     if (res.ok) {
@@ -270,23 +292,33 @@ export async function buscarProdutoML(query: string): Promise<ProdutoMLExtraido 
       results = json.results || [];
     }
 
-    // Se a consulta com fulfillment não encontrar itens válidos, faz busca geral sem filtro de fulfillment
+    // Se a consulta com fulfillment não encontrar itens válidos e não houve rate limit/bloqueio,
+    // faz busca geral sem filtro de fulfillment
     const itensComFull = results.filter((it) => it && it.price > 0 && it.permalink);
-    if (itensComFull.length === 0) {
-      apiUrl = `https://api.mercadolibre.com/sites/MLB/search?q=${encodeURIComponent(
-        queryLimpa
-      )}&limit=5`;
+    if (itensComFull.length === 0 && !erroBloqueioOuRateLimit && !erroDetalhadoApi) {
+      apiUrl = `https://api.mercadolibre.com/sites/MLB/search?q=${queryEncoded}&limit=5`;
 
       res = await fetch(apiUrl, {
-        headers: {
-          "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-          Accept: "application/json",
-        },
-        next: { revalidate: 3600 },
+        headers: ML_API_HEADERS,
+        next: { revalidate: 60 },
       });
 
-      if (res.ok) {
+      if (res.status === 429 || res.status === 403) {
+        console.error("Bloqueio/Rate Limit ML:", res.statusText || `${res.status}`);
+        erroBloqueioOuRateLimit = "Limite temporário de consultas da API atingido. Aguarde 30 segundos ou use a aba 'Por Link Direto'";
+      } else if (!res.ok) {
+        let detalhe = "";
+        try {
+          const errJson = await res.json();
+          detalhe = errJson.message || errJson.error || JSON.stringify(errJson);
+        } catch {
+          try {
+            detalhe = await res.text();
+          } catch {}
+        }
+        console.error("Erro na API do Mercado Livre:", res.status, detalhe);
+        erroDetalhadoApi = detalhe ? `Erro API ML (${res.status}): ${detalhe}` : `Erro API ML (Status ${res.status})`;
+      } else {
         const json = await res.json();
         results = json.results || [];
       }
@@ -311,11 +343,18 @@ export async function buscarProdutoML(query: string): Promise<ProdutoMLExtraido 
     let searchUrl = `https://lista.mercadolivre.com.br/${fallbackSlug}_Envio_Full`;
     let htmlRes = await fetch(searchUrl, {
       headers: {
-        "User-Agent": "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "pt-BR,pt;q=0.9",
       },
+      next: { revalidate: 60 },
     });
+
+    if (htmlRes.status === 429 || htmlRes.status === 403) {
+      console.error("Bloqueio/Rate Limit ML:", htmlRes.statusText || `${htmlRes.status}`);
+      erroBloqueioOuRateLimit = "Limite temporário de consultas da API atingido. Aguarde 30 segundos ou use a aba 'Por Link Direto'";
+    }
 
     let html = htmlRes.ok ? await htmlRes.text() : "";
     let allHrefs = [...html.matchAll(/href=["'](https:\/\/[^"']*(?:mercadolivre\.com\.br\/[^\/]+\/up\/MLBU|produto\.mercadolivre\.com\.br\/MLB-|mercadolivre\.com\.br\/p\/MLB)[^"']*)["']/gi)].map(m => m[1]);
@@ -325,11 +364,19 @@ export async function buscarProdutoML(query: string): Promise<ProdutoMLExtraido 
       searchUrl = `https://lista.mercadolivre.com.br/${fallbackSlug}`;
       htmlRes = await fetch(searchUrl, {
         headers: {
-          "User-Agent": "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
           Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
           "Accept-Language": "pt-BR,pt;q=0.9",
         },
+        next: { revalidate: 60 },
       });
+
+      if (htmlRes.status === 429 || htmlRes.status === 403) {
+        console.error("Bloqueio/Rate Limit ML:", htmlRes.statusText || `${htmlRes.status}`);
+        erroBloqueioOuRateLimit = "Limite temporário de consultas da API atingido. Aguarde 30 segundos ou use a aba 'Por Link Direto'";
+      }
+
       if (htmlRes.ok) {
         html = await htmlRes.text();
         allHrefs = [...html.matchAll(/href=["'](https:\/\/[^"']*(?:mercadolivre\.com\.br\/[^\/]+\/up\/MLBU|produto\.mercadolivre\.com\.br\/MLB-|mercadolivre\.com\.br\/p\/MLB)[^"']*)["']/gi)].map(m => m[1]);
@@ -350,8 +397,12 @@ export async function buscarProdutoML(query: string): Promise<ProdutoMLExtraido 
       try {
         const prodRes = await fetch(cleanProductUrl, {
           headers: {
-            "User-Agent": "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+            "User-Agent":
+              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "pt-BR,pt;q=0.9",
           },
+          next: { revalidate: 60 },
         });
 
         if (prodRes.ok) {
@@ -472,6 +523,15 @@ export async function buscarProdutoML(query: string): Promise<ProdutoMLExtraido 
     }
   } catch (fallbackErr) {
     console.error("Erro no fallback de busca do Mercado Livre:", fallbackErr);
+  }
+
+  // Se não encontrou no fallback e houve rate limit ou bloqueio da API, propaga a mensagem clara
+  if (erroBloqueioOuRateLimit) {
+    throw new Error(erroBloqueioOuRateLimit);
+  }
+
+  if (erroDetalhadoApi) {
+    throw new Error(erroDetalhadoApi);
   }
 
   return null;

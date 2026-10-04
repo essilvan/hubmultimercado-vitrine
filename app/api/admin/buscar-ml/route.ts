@@ -52,7 +52,8 @@ export async function GET(request: NextRequest) {
   } catch (err: unknown) {
     console.error("Erro na busca via API do ML (GET):", err);
     const msg = err instanceof Error ? err.message : "Falha interna ao processar busca no Mercado Livre.";
-    return NextResponse.json({ success: false, error: msg }, { status: 500 });
+    const isRateLimit = msg.includes("Limite temporário");
+    return NextResponse.json({ success: false, error: msg }, { status: isRateLimit ? 429 : 500 });
   }
 }
 
@@ -173,6 +174,7 @@ export async function POST(request: NextRequest) {
   } catch (err: unknown) {
     console.error("Erro na busca e cadastro via API do ML:", err);
     const msg = err instanceof Error ? err.message : "Falha interna ao processar busca no Mercado Livre.";
-    return NextResponse.json({ success: false, error: msg }, { status: 500 });
+    const isRateLimit = msg.includes("Limite temporário");
+    return NextResponse.json({ success: false, error: msg }, { status: isRateLimit ? 429 : 500 });
   }
 }
