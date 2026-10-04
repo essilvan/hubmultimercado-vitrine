@@ -4,8 +4,7 @@ import { supabase } from "@/lib/supabase";
 export const revalidate = 3600; // Gera novamente a cada 1 hora para absorver novos produtos cadastrados
 
 export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
-  const baseUrl = (process.env.NEXT_PUBLIC_SITE_URL || "https://catalogopecas.com.br").replace(/\/+$/, "");
-
+const baseUrl = (process.env.NEXT_PUBLIC_SITE_URL || "https://hubmultimercado-vitrine.vercel.app").replace(/\/+$/, "");
   // 1. Rotas estáticas principais
   const routes: MetadataRoute.Sitemap = [
     {
