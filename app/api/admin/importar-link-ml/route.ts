@@ -1,5 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import {
+  extrairDescricaoHtml,
+  extrairTabelaEspecificacoesHtml,
+  extrairDadosDescricaoML,
+} from "@/lib/mercadolivre";
 
 export const runtime = "nodejs";
 
@@ -495,11 +500,28 @@ export async function POST(request: NextRequest) {
     const precoEstimadoFormatado = precoEstimado;
     const precoAntigoFormatado = precoAntigo;
 
-    // 5. Deduções Automáticas
-    const marca = deduzirMarca(rawTitle);
-    const codigo_fabricante = deduzirCodigo(rawTitle, marca);
+    // 5. Extração de Descrição, Tabela Técnica e Aplicação
+    const descricao = extrairDescricaoHtml(html);
+    const tabelaAttrs = extrairTabelaEspecificacoesHtml(html);
+    const { aplicacao, compatibility, dados_tecnicos } = extrairDadosDescricaoML(
+      descricao,
+      tabelaAttrs,
+      rawTitle
+    );
+
+    const marca = dados_tecnicos.marca || deduzirMarca(rawTitle);
+    const codigo_fabricante = dados_tecnicos.codigo_fabricante || deduzirCodigo(rawTitle, marca);
     const categoria = deduzirCategoria(rawTitle);
-    const veiculos_compativeis = deduzirVeiculos(rawTitle);
+
+    let veiculos_compativeis = deduzirVeiculos(rawTitle);
+    if (aplicacao.length > 0) {
+      if (aplicacao.length === 1) {
+        veiculos_compativeis = aplicacao[0].startsWith("Compatível") ? aplicacao[0] : `Compatível com ${aplicacao[0]}`;
+      } else {
+        veiculos_compativeis = `Compatível com ${aplicacao.slice(0, 4).join(" / ")}`;
+      }
+    }
+
     const busca_ml = `${marca} ${codigo_fabricante}`.trim();
 
     // 6. Geração de Slug
@@ -519,12 +541,25 @@ export async function POST(request: NextRequest) {
       busca_ml,
       categoria,
       veiculos_compativeis,
+      codigo_oem: dados_tecnicos.codigo_oem || null,
       especificacoes: {
         link_afiliado: trimmedUrl,
         link_ml: trimmedUrl,
         link_destino: trimmedUrl,
+        marca,
+        preco: precoEstimadoFormatado,
         preco_antigo: precoAntigoFormatado,
         desconto_percentual: descontoPercentual,
+        aplicacao,
+        compatibility,
+        dados_tecnicos: {
+          ...dados_tecnicos,
+          codigo_fabricante,
+          marca,
+        },
+        descricao_completa: descricao || undefined,
+        atributos_ml: tabelaAttrs,
+        ultima_sincronizacao: new Date().toISOString(),
       },
     };
 
@@ -537,6 +572,8 @@ export async function POST(request: NextRequest) {
           link_afiliado: trimmedUrl,
           preco_antigo: precoAntigoFormatado,
           desconto_percentual: descontoPercentual,
+          aplicacao: aplicacao,
+          compatibility: compatibility,
         },
         { onConflict: "slug" }
       )

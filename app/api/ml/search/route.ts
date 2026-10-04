@@ -114,6 +114,9 @@ export async function POST(request: NextRequest) {
         preco: produtoDados.preco_estimado,
         preco_antigo: produtoDados.preco_antigo || null,
         desconto_percentual: produtoDados.desconto_percentual || null,
+        aplicacao: produtoDados.especificacoes?.aplicacao || [],
+        compatibility: produtoDados.especificacoes?.compatibility || "",
+        dados_tecnicos: produtoDados.especificacoes?.dados_tecnicos || {},
       },
       updated_at: new Date().toISOString(),
     };

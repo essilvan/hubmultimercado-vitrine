@@ -24,6 +24,38 @@ export interface MLSearchResultItem {
   };
 }
 
+export interface DadosTecnicosProduto {
+  codigo_fabricante?: string;
+  marca?: string;
+  diametro?: string;
+  estrias?: string;
+  conteudo?: string;
+  codigo_oem?: string;
+  posicao?: string;
+  lado?: string;
+  tipo_veiculo?: string;
+  garantia?: string;
+  [key: string]: string | undefined;
+}
+
+export interface EspecificacoesML {
+  ml_id: string;
+  link_ml: string;
+  link_afiliado: string;
+  link_destino: string;
+  marca: string;
+  preco: string;
+  preco_antigo?: string | null;
+  desconto_percentual?: string | null;
+  aplicacao?: string[];
+  compatibility?: string;
+  dados_tecnicos?: DadosTecnicosProduto;
+  descricao_completa?: string;
+  atributos_ml?: Record<string, string | undefined>;
+  ultima_sincronizacao?: string;
+  [key: string]: unknown;
+}
+
 export interface ProdutoMLExtraido {
   id: string;
   title: string;
@@ -56,18 +88,7 @@ export interface ProdutoMLExtraido {
     desconto_percentual: string | null;
     imagem_url: string;
     link_afiliado: string;
-    especificacoes: {
-      ml_id: string;
-      link_ml: string;
-      link_afiliado: string;
-      link_destino: string;
-      marca: string;
-      preco: string;
-      preco_antigo?: string | null;
-      desconto_percentual?: string | null;
-      atributos_ml?: Record<string, string | undefined>;
-      ultima_sincronizacao?: string;
-    };
+    especificacoes: EspecificacoesML;
   };
 }
 
@@ -359,6 +380,281 @@ export async function consultarDetalhesItemML(itemId: string): Promise<MLSearchR
 }
 
 /**
+ * Consulta a descrição oficial de um item na API do Mercado Livre
+ */
+export async function obterDescricaoItemML(itemId: string): Promise<string | null> {
+  const cleanId = itemId.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+  if (!cleanId.startsWith("MLB")) return null;
+
+  try {
+    const headers = await obterHeadersApiML();
+    const res = await fetch(`https://api.mercadolibre.com/items/${cleanId}/description`, {
+      headers,
+      next: { revalidate: 3600 },
+    });
+
+    if (!res.ok) {
+      return null;
+    }
+
+    const data = await res.json();
+    return typeof data.plain_text === "string" ? data.plain_text.trim() : null;
+  } catch (err) {
+    console.warn(`Aviso ao consultar descrição do item ${cleanId}:`, err);
+    return null;
+  }
+}
+
+/**
+ * Extrai o texto limpo da descrição a partir do HTML do anúncio do Mercado Livre
+ */
+export function extrairDescricaoHtml(html: string): string | null {
+  if (!html) return null;
+
+  const match =
+    html.match(/<p[^>]*class=["'][^"']*ui-pdp-description__content[^"']*["'][^>]*>([\s\S]*?)<\/p>/i) ||
+    html.match(/<div[^>]*class=["'][^"']*ui-pdp-description__content[^"']*["'][^>]*>([\s\S]*?)<\/div>/i) ||
+    html.match(/class=["'][^"']*ui-pdp-description[^"']*["'][^>]*>([\s\S]*?)<\/section>/i);
+
+  if (match && match[1]) {
+    const raw = match[1]
+      .replace(/<br\s*[\/]?>/gi, "\n")
+      .replace(/<\/p>/gi, "\n")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/&amp;/g, "&")
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/\u00a0/g, " ")
+      .trim();
+    if (raw.length > 5) return raw;
+  }
+
+  return null;
+}
+
+/**
+ * Extrai pares de chave e valor da tabela de especificações do HTML do anúncio
+ */
+export function extrairTabelaEspecificacoesHtml(html: string): Record<string, string> {
+  const tableAttrs: Record<string, string> = {};
+  if (!html) return tableAttrs;
+
+  const rows = [...html.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)];
+  for (const r of rows) {
+    const th = r[1]
+      .match(/<th[^>]*>([\s\S]*?)<\/th>/i)?.[1]
+      ?.replace(/<[^>]+>/g, "")
+      ?.trim();
+    const td = r[1]
+      .match(/<td[^>]*>([\s\S]*?)<\/td>/i)?.[1]
+      ?.replace(/<[^>]+>/g, "")
+      ?.trim();
+    if (th && td) {
+      tableAttrs[th] = td;
+    }
+  }
+
+  return tableAttrs;
+}
+
+/**
+ * Extrai a lista de aplicação de veículos e os dados técnicos estruturados da descrição e atributos
+ */
+export function extrairDadosDescricaoML(
+  descricaoTexto?: string | null,
+  atributosML?: Record<string, string | undefined>,
+  titulo?: string
+): {
+  aplicacao: string[];
+  compatibility: string;
+  dados_tecnicos: DadosTecnicosProduto;
+} {
+  const desc = (descricaoTexto || "").replace(/\r\n/g, "\n");
+  const attrs: Record<string, string | undefined> = {};
+  if (atributosML) {
+    for (const [k, v] of Object.entries(atributosML)) {
+      if (v) {
+        attrs[k.toUpperCase()] = String(v).trim();
+      }
+    }
+  }
+
+  // 1. Extração de Aplicação / Veículos Compatíveis
+  const aplicacao: string[] = [];
+  const lines = desc.split("\n").map((l) => l.trim());
+
+  let emBlocoAplicacao = false;
+  for (const line of lines) {
+    if (!line) continue;
+
+    // Identifica início da seção de aplicação
+    if (
+      /^(?:APLICA[ÇC][ÃA]O|APLICA[ÇC][ÕO]ES|VE[ÍI]CULOS COMPAT[ÍI]VEIS|COMPATIBILIDADE|APLICA-SE|APLIC[ÁA]VEL EM|TABELA DE APLICA[ÇC][ÃA]O|COMPAT[ÍI]VEL COM)[:\s-]*$/i.test(
+        line
+      )
+    ) {
+      emBlocoAplicacao = true;
+      continue;
+    }
+
+    // Identifica fim da seção de aplicação quando encontrar outro cabeçalho
+    if (
+      emBlocoAplicacao &&
+      /^(?:DADOS T[ÉE]CNICOS|ESPECIFICA[ÇC][ÕO]ES|CONTE[ÚU]DO|INFORMA[ÇC][ÕO]ES|GARANTIA|OBS|ATEN[ÇC][ÃA]O|C[ÓO]DIGO|D[ÚU]VIDAS|IMPORTANTE|FABRICANTE)[:\s-]/i.test(
+        line
+      )
+    ) {
+      emBlocoAplicacao = false;
+      continue;
+    }
+
+    if (emBlocoAplicacao) {
+      const cleanLine = line.replace(/^[-*•·>✓]\s*/, "").trim();
+      if (
+        cleanLine.length >= 3 &&
+        !/^(?:consulte|antes de|foto|imagem|duvidas|garantia|frete|atencao|importante|obs)/i.test(
+          cleanLine
+        )
+      ) {
+        aplicacao.push(cleanLine);
+      }
+    }
+  }
+
+  // Fallback: Se não encontrou cabeçalho explícito "APLICAÇÃO", busca linhas com veículos conhecidos
+  if (aplicacao.length === 0) {
+    const regexVeiculosLinha =
+      /\b(Fiat|Chevrolet|GM|Ford|Volkswagen|VW|Renault|Hyundai|Toyota|Honda|Nissan|Jeep|Peugeot|Citro[eë]n|Palio|Uno|Gol|Fox|Polo|Voyage|Saveiro|Onix|Prisma|Corsa|Celta|HB20|Ka|Fiesta|EcoSport|Civic|Fit|Corolla|Sandero|Logan|Duster|Compass|Renegade|Mobi|Siena|Strada|Toro|Cruze|Spin|Cobalt|Tracker|Kicks|Creta|Up!?|Golf)\b/i;
+    for (const line of lines) {
+      const cleanLine = line.replace(/^[-*•·>✓]\s*/, "").trim();
+      if (
+        regexVeiculosLinha.test(cleanLine) &&
+        cleanLine.length >= 4 &&
+        cleanLine.length <= 120
+      ) {
+        if (
+          !/^(?:garantia|atencao|importante|obs|foto|imagem|duvidas|politica)/i.test(
+            cleanLine
+          )
+        ) {
+          aplicacao.push(cleanLine);
+        }
+      }
+    }
+  }
+
+  // Se ainda estiver vazio, deduz a partir do título
+  if (aplicacao.length === 0 && titulo) {
+    const deduzidos = deduzirVeiculos(titulo);
+    if (deduzidos && !deduzidos.startsWith("Consulte")) {
+      aplicacao.push(deduzidos);
+    }
+  }
+
+  // 2. Extração dos Dados Técnicos
+  const dadosTecnicos: DadosTecnicosProduto = {};
+
+  // Marca / Fabricante
+  const marcaAttr =
+    attrs["MARCA"] || attrs["BRAND"] || attrs["FABRICANTE"] || attrs["MANUFACTURER"];
+  const marcaDesc = desc
+    .match(/(?:Fabricante|Marca)\s*[:=-]\s*([^\n\r]+)/i)?.[1]
+    ?.trim();
+  const marcaDeduzida = titulo ? deduzirMarca(titulo) : null;
+  dadosTecnicos.marca = marcaAttr || marcaDesc || marcaDeduzida || "Auto Peças";
+
+  // Código Fabricante / Número da Peça
+  const codAttr =
+    attrs["PART_NUMBER"] ||
+    attrs["NUMERO_DE_PECA"] ||
+    attrs["NÚMERO DE PEÇA"] ||
+    attrs["CODIGO_DE_FABRICANTE"] ||
+    attrs["CODIGO_FABRICANTE"];
+
+  const codDescMatch = desc.match(
+    /(?:C[óo]digo(?:\s+da\s+pe[çc]a|\s+do\s+fabricante)?|Part\s*Number|Ref(?:\.|er[eê]ncia)?)\s*[:=-]\s*([A-Za-z0-9\.\-\/]+(?:\s+[A-Za-z0-9\.\-\/]+)*)/i
+  );
+  const codDesc = codDescMatch?.[1]?.trim();
+
+  // Padrões de código automotivo fortes (ex: LuK 619 3015 00 ou 619312000, Bosch F000..., etc.)
+  const codePatt = desc.match(
+    /\b(6\d{2}\s?\d{4}\s?\d{2}|6\d{8}|[A-Z]{2,4}[/-]\d{3,6}|F000[A-Z0-9]{5,7}|CT\d{4,5})\b/i
+  );
+
+  let codigoFinal = codDesc || codePatt?.[1]?.trim() || codAttr;
+  if (!codigoFinal && titulo) {
+    codigoFinal = deduzirCodigo(titulo, dadosTecnicos.marca || "Auto Peças");
+  }
+  dadosTecnicos.codigo_fabricante = codigoFinal || undefined;
+
+  // Diâmetro
+  const diamAttr =
+    attrs["DIÂMETRO DO DISCO"] ||
+    attrs["DIÂMETRO"] ||
+    attrs["DIAMETRO"] ||
+    attrs["DIAMETER"];
+  const diamDesc =
+    desc.match(/(?:Di[âa]metro(?:\s+do\s+disco)?)\s*[:=-]?\s*([0-9.,]+\s*(?:mm|pol| polegadas|cm)?)/i)?.[1]?.trim() ||
+    desc.match(/\b([0-9]{2,3}(?:[.,][0-9]+)?\s*mm)\b/i)?.[1]?.trim();
+  dadosTecnicos.diametro = diamDesc || diamAttr || undefined;
+
+  // Estrias
+  const estriasAttr =
+    attrs["QUANTIDADE DE ESTRIAS"] ||
+    attrs["ESTRIAS"] ||
+    attrs["TEETH_COUNT"] ||
+    attrs["SPLINES"];
+  const estriasDesc =
+    desc.match(/(?:Estrias|N[úu]mero\s+de\s+[eE]strias|Qtd\s+de\s+[eE]strias)\s*[:=-]?\s*(\d{1,2}(?:\s*estrias)?)/i)?.[1]?.trim() ||
+    desc.match(/\b(\d{1,2})\s*estrias\b/i)?.[1]?.trim();
+  dadosTecnicos.estrias = estriasDesc || (estriasAttr ? `${estriasAttr}` : undefined);
+
+  // Conteúdo da Embalagem
+  const conteudoDesc = desc
+    .match(/(?:Conte[úu]do(?:\s+da\s+embalagem)?|Itens\s+inclusos|Composi[çc][ãa]o)\s*[:=-]\s*([^\n\r]+)/i)?.[1]
+    ?.trim();
+  let conteudoMontado = conteudoDesc;
+  if (!conteudoMontado) {
+    const partes: string[] = [];
+    if (/sim/i.test(attrs["INCLUI PLATÔ"] || "")) partes.push("Platô");
+    if (/sim/i.test(attrs["INCLUI DISCO"] || "")) partes.push("Disco");
+    if (
+      /sim/i.test(attrs["INCLUI ROLIMÃ DE IMPULSO"] || "") ||
+      /sim/i.test(attrs["INCLUI ROLAMENTO"] || "")
+    ) {
+      partes.push("Rolamento de Desarme");
+    }
+    if (/sim/i.test(attrs["INCLUI ATUADOR"] || "")) partes.push("Atuador Hidráulico");
+    if (partes.length > 0) {
+      conteudoMontado = partes.join(" + ");
+    }
+  }
+  dadosTecnicos.conteudo = conteudoMontado || undefined;
+
+  // Código OEM
+  const oemAttr = attrs["OEM"] || attrs["CÓDIGO OEM"] || attrs["CODIGO_OEM"];
+  const oemDesc = desc
+    .match(/(?:C[óo]digo\s+OEM|OEM|Convers[ãa]o|Original)\s*[:=-]\s*([A-Za-z0-9\s\.\-\/,;]+)/i)?.[1]
+    ?.trim();
+  if (oemDesc || (oemAttr && !/nao\s+se\s+aplica/i.test(oemAttr))) {
+    dadosTecnicos.codigo_oem = oemDesc || oemAttr;
+  }
+
+  // Posição / Lado
+  const posAttr = attrs["POSIÇÃO"] || attrs["POSICAO"] || attrs["LADO"];
+  const posDesc = desc.match(/\b(Dianteir[oa]|Traseir[oa]|Direit[oa]|Esquerd[oa]|Superior|Inferior)\b/i)?.[1];
+  dadosTecnicos.posicao = posAttr || posDesc || undefined;
+
+  return {
+    aplicacao,
+    compatibility: aplicacao.join("\n"),
+    dados_tecnicos: dadosTecnicos,
+  };
+}
+
+/**
  * Consulta a API do Mercado Livre buscando pelo menor preço real com entrega Full
  * @param query Código ou descrição da peça (ex: "SYL 1092" ou "LUK 620 3268 00 HB20")
  */
@@ -440,7 +736,11 @@ export async function buscarProdutoML(query: string): Promise<ProdutoMLExtraido 
     const itemEscolhido = itensValidos[0];
 
     if (itemEscolhido) {
-      return processarItemML(itemEscolhido, queryLimpa);
+      let descItem: string | null = null;
+      try {
+        descItem = await obterDescricaoItemML(itemEscolhido.id);
+      } catch {}
+      return processarItemML(itemEscolhido, queryLimpa, descItem);
     }
   } catch (err) {
     console.warn("Aviso na chamada direta da API do Mercado Livre:", err);
@@ -499,12 +799,16 @@ export async function buscarProdutoML(query: string): Promise<ProdutoMLExtraido 
       const idMatch = cleanProductUrl.match(/MLB-?(\d+)/i) || cleanProductUrl.match(/MLBU-?(\d+)/i);
       const mlbId = idMatch ? `MLB${idMatch[1]}` : "MLB-PRODUTO";
 
+      let descricaoProd: string | null = null;
+      let tabelaAttrs: Record<string, string> = {};
+
       // Tenta obter os dados oficiais do item via API do Mercado Livre com Token OAuth
       if (idMatch) {
         const itemApi = await consultarDetalhesItemML(`MLB${idMatch[1]}`);
         if (itemApi && itemApi.price > 0) {
           if (!itemApi.permalink) itemApi.permalink = cleanProductUrl;
-          return processarItemML(itemApi, queryLimpa);
+          const descApi = await obterDescricaoItemML(itemApi.id);
+          return processarItemML(itemApi, queryLimpa, descApi);
         }
       }
 
@@ -515,7 +819,7 @@ export async function buscarProdutoML(query: string): Promise<ProdutoMLExtraido 
       let brandFound: string | null = null;
 
       try {
-        const prodRes = await fetch(cleanProductUrl, {
+        let prodRes = await fetch(cleanProductUrl, {
           headers: {
             "User-Agent":
               "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -525,8 +829,27 @@ export async function buscarProdutoML(query: string): Promise<ProdutoMLExtraido 
           next: { revalidate: 60 },
         });
 
+        // Se bloqueado, usa fallback para preview bot para recuperar dados e descrição
+        if (!prodRes.ok || prodRes.status === 403) {
+          try {
+            const botRes = await fetch(cleanProductUrl, {
+              headers: {
+                "User-Agent": "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+                Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "pt-BR,pt;q=0.9",
+              },
+              next: { revalidate: 60 },
+            });
+            if (botRes.ok) prodRes = botRes;
+          } catch {}
+        }
+
         if (prodRes.ok) {
           const prodHtml = await prodRes.text();
+
+          // Extração da descrição limpa e da tabela de especificações técnicas do HTML
+          descricaoProd = extrairDescricaoHtml(prodHtml);
+          tabelaAttrs = extrairTabelaEspecificacoesHtml(prodHtml);
 
           // 1. Extração de Marca e Preço via JSON-LD
           const jsonLdScripts = prodHtml.matchAll(
@@ -639,7 +962,7 @@ export async function buscarProdutoML(query: string): Promise<ProdutoMLExtraido 
         attributes: brandFound ? [{ id: "BRAND", name: "Marca", value_name: brandFound }] : undefined,
       };
 
-      return processarItemML(fallbackItem, queryLimpa);
+      return processarItemML(fallbackItem, queryLimpa, descricaoProd, tabelaAttrs);
     }
   } catch (fallbackErr) {
     console.error("Erro no fallback de busca do Mercado Livre:", fallbackErr);
@@ -658,9 +981,14 @@ export async function buscarProdutoML(query: string): Promise<ProdutoMLExtraido 
 }
 
 /**
- * Processa e estrutura o item da API do Mercado Livre
+ * Processa e estrutura o item da API do Mercado Livre com extração técnica de especificações e aplicação
  */
-function processarItemML(item: MLSearchResultItem, queryOriginal: string): ProdutoMLExtraido {
+export function processarItemML(
+  item: MLSearchResultItem,
+  queryOriginal: string,
+  descricaoTexto?: string | null,
+  tabelaHtmlAttrs?: Record<string, string>
+): ProdutoMLExtraido {
   const permalink = item.permalink || "";
   const linkAfiliado = formatarLinkAfiliado(permalink);
 
@@ -678,8 +1006,13 @@ function processarItemML(item: MLSearchResultItem, queryOriginal: string): Produ
     }
   }
 
-  // Extração de atributos específicos (Marca, Modelo, Número de Peça, OEM)
+  // Extração e mesclagem de atributos (da API e da tabela HTML do anúncio)
   const attrs: Record<string, string | undefined> = {};
+  if (tabelaHtmlAttrs) {
+    for (const [k, v] of Object.entries(tabelaHtmlAttrs)) {
+      if (v) attrs[k.toUpperCase()] = v.trim();
+    }
+  }
   if (Array.isArray(item.attributes)) {
     for (const attr of item.attributes) {
       if (!attr.value_name) continue;
@@ -688,30 +1021,38 @@ function processarItemML(item: MLSearchResultItem, queryOriginal: string): Produ
     }
   }
 
-  // Extração da Marca com prioridade absoluta para BRAND dos atributos do anúncio
+  // Extração inteligente de aplicação e dados técnicos estruturados
+  const { aplicacao, compatibility, dados_tecnicos } = extrairDadosDescricaoML(
+    descricaoTexto,
+    attrs,
+    item.title
+  );
+
+  // Extração da Marca com prioridade para dados técnicos e BRAND dos atributos
   const attrMarca = item.attributes?.find(
     (a: any) => a.id === "BRAND" || a.name?.toLowerCase() === "marca"
   )?.value_name;
 
-  let marca = attrMarca ? attrMarca.trim() : null;
-  if (!marca) {
+  let marca = dados_tecnicos.marca || attrMarca || attrs["BRAND"] || attrs["MARCA"] || null;
+  if (!marca || marca === "Auto Peças") {
     marca = deduzirMarca(queryOriginal) || deduzirMarca(item.title) || "Auto Peças";
   }
 
   const numeroPeca =
+    dados_tecnicos.codigo_fabricante ||
     attrs["PART_NUMBER"] ||
     attrs["NUMERO_DE_PECA"] ||
     attrs["CODIGO_DE_FABRICANTE"] ||
     deduzirCodigo(item.title, marca);
 
-  const oem = attrs["OEM"] || attrs["CODIGO_OEM"] || null;
+  const oem = dados_tecnicos.codigo_oem || attrs["OEM"] || attrs["CODIGO_OEM"] || null;
   const modelo = attrs["MODEL"] || attrs["MODELO"] || undefined;
 
-  // 1. Preço atual de venda: item.price (ex: 31.92). Formate sempre com duas casas decimais: "R$ 31,92"
+  // 1. Preço atual de venda
   const precoNumerico = Number(item.price) || 0;
   const precoFormatado = precoNumerico > 0 ? formatarPrecoBRL(precoNumerico) : "";
 
-  // 2. Preço antigo/original: item.original_price. Se existir e for maior que item.price, formate como "R$ 39,90"
+  // 2. Preço antigo/original
   const precoOriginalNumerico =
     item.original_price && Number(item.original_price) > precoNumerico
       ? Number(item.original_price)
@@ -721,9 +1062,7 @@ function processarItemML(item: MLSearchResultItem, queryOriginal: string): Produ
     ? formatarPrecoBRL(precoOriginalNumerico)
     : null;
 
-  // 3. Desconto percentual: Se houver 'original_price', calcule:
-  // const desconto = Math.round(((item.original_price - item.price) / item.original_price) * 100);
-  // desconto_percentual = `${desconto}% OFF`;
+  // 3. Desconto percentual
   let descontoPercentual: string | null = null;
   if (precoOriginalNumerico && precoOriginalNumerico > precoNumerico) {
     const desconto = Math.round(((precoOriginalNumerico - precoNumerico) / precoOriginalNumerico) * 100);
@@ -733,7 +1072,17 @@ function processarItemML(item: MLSearchResultItem, queryOriginal: string): Produ
   }
 
   const categoria = deduzirCategoria(item.title);
-  const veiculos = deduzirVeiculos(item.title);
+
+  // Veículos compatíveis: prioriza a aplicação extraída da descrição
+  let veiculos = deduzirVeiculos(item.title);
+  if (aplicacao.length > 0) {
+    if (aplicacao.length === 1) {
+      veiculos = aplicacao[0].startsWith("Compatível") ? aplicacao[0] : `Compatível com ${aplicacao[0]}`;
+    } else {
+      veiculos = `Compatível com ${aplicacao.slice(0, 4).join(" / ")}`;
+    }
+  }
+
   const slug = gerarSlug(item.title) || `peca-${item.id.toLowerCase()}`;
 
   return {
@@ -761,10 +1110,10 @@ function processarItemML(item: MLSearchResultItem, queryOriginal: string): Produ
       veiculos_compativeis: veiculos,
       codigo_oem: oem,
       busca_ml: queryOriginal,
-      preco: precoFormatado, // "R$ 31,92"
-      preco_estimado: precoFormatado, // "R$ 31,92"
-      preco_antigo: precoOriginalFormatado, // "R$ 39,90" ou null
-      desconto_percentual: descontoPercentual, // "20% OFF" ou null
+      preco: precoFormatado,
+      preco_estimado: precoFormatado,
+      preco_antigo: precoOriginalFormatado,
+      desconto_percentual: descontoPercentual,
       imagem_url: thumbnail,
       link_afiliado: linkAfiliado,
       especificacoes: {
@@ -776,6 +1125,15 @@ function processarItemML(item: MLSearchResultItem, queryOriginal: string): Produ
         preco: precoFormatado,
         preco_antigo: precoOriginalFormatado,
         desconto_percentual: descontoPercentual,
+        aplicacao: aplicacao,
+        compatibility: compatibility,
+        dados_tecnicos: {
+          ...dados_tecnicos,
+          codigo_fabricante: numeroPeca,
+          marca: marca,
+          codigo_oem: oem || undefined,
+        },
+        descricao_completa: descricaoTexto || undefined,
         atributos_ml: attrs,
         ultima_sincronizacao: new Date().toISOString(),
       },
