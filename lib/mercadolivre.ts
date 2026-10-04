@@ -246,7 +246,7 @@ function deduzirCodigo(titulo: string, marca: string): string {
  * @param query Código ou descrição da peça (ex: "SYL 1092" ou "LUK 620 3268 00 HB20")
  */
 export async function buscarProdutoML(query: string): Promise<ProdutoMLExtraido | null> {
-  const queryLimpa = query.replace(/[\/\\]/g, ' ').replace(/\s+/g, ' ').trim();
+  const queryLimpa = query.replace(/[\/\\_\-]/g, ' ').replace(/\s+/g, ' ').trim();
   if (!queryLimpa) return null;
 
   // 1. Consulta à API Oficial do Mercado Livre (tenta com Full primeiro; fallback automático para busca geral)
