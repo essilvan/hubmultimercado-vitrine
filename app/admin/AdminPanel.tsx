@@ -24,6 +24,7 @@ import {
   RotateCw,
   Clock,
   Zap,
+  LogOut,
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 
@@ -602,6 +603,15 @@ export default function AdminPanel() {
               <span>Ver Vitrine</span>
               <ExternalLink className="w-3.5 h-3.5" />
             </Link>
+
+            <a
+              href="/api/admin/logout"
+              className="flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-lg bg-red-950/40 hover:bg-red-900/60 text-red-300 border border-red-800/40 transition cursor-pointer"
+              title="Encerrar sessão de administrador"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span>Sair</span>
+            </a>
           </div>
         </div>
       </header>
