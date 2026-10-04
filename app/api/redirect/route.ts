@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { obterHeadersApiML } from "@/lib/mercadolivre";
 
 export const dynamic = "force-dynamic";
 
@@ -44,18 +45,14 @@ export async function GET(request: NextRequest) {
     const queryTexto = query.trim();
 
     try {
+      const headers = await obterHeadersApiML();
       // Faz requisição à API pública do Mercado Livre
       const res = await fetch(
         `https://api.mercadolibre.com/sites/MLB/search?q=${encodeURIComponent(
           queryTexto
         )}&shipping_highlighted=fulfillment&limit=1`,
         {
-          headers: {
-            "User-Agent":
-              "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            Accept: "application/json",
-            "Accept-Language": "pt-BR,pt;q=0.9",
-          },
+          headers,
           next: { revalidate: 60 },
         }
       );

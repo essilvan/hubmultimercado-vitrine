@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { consultarDetalhesItemML, obterImagemAltaResolucao } from "@/lib/mercadolivre";
 
 export const runtime = "nodejs";
 
@@ -52,7 +53,27 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Requisição fetch à página do produto simulando navegador habitual
+    // 1. Tenta extrair foto oficial em alta resolução via API do Mercado Livre
+    const idMatch = trimmedUrl.match(/MLB-?(\d+)/i) || trimmedUrl.match(/MLBU-?(\d+)/i);
+    if (idMatch) {
+      try {
+        const itemApi = await consultarDetalhesItemML(`MLB${idMatch[1]}`);
+        if (itemApi?.pictures && itemApi.pictures.length > 0) {
+          const pic = itemApi.pictures[0].secure_url || itemApi.pictures[0].url;
+          if (pic) {
+            return NextResponse.json({
+              success: true,
+              imageUrl: obterImagemAltaResolucao(pic),
+              source: "api_ml",
+            });
+          }
+        }
+      } catch (errApi) {
+        console.warn("Aviso ao extrair foto via API do ML:", errApi);
+      }
+    }
+
+    // 2. Requisição fetch à página do produto simulando navegador habitual (Fallback)
     const response = await fetch(trimmedUrl, {
       redirect: "follow",
       headers: {

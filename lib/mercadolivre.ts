@@ -241,12 +241,122 @@ function deduzirCodigo(titulo: string, marca: string): string {
   return marca && marca !== "Auto Peças" ? `${marca}-COD` : "COD-ML";
 }
 
-const ML_API_HEADERS = {
-  "User-Agent":
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-  Accept: "application/json",
-  "Accept-Language": "pt-BR,pt;q=0.9",
-};
+/**
+ * Armazena o token de acesso da API do Mercado Livre em memória com timestamp de expiração
+ */
+let cachedMLToken: {
+  token: string;
+  expiresAt: number;
+} | null = null;
+
+/**
+ * Obtém o Access Token da API do Mercado Livre automaticamente via OAuth (client_credentials).
+ * Armazena em memória com tempo de expiração para evitar requisições de autenticação desnecessárias.
+ */
+export async function obterTokenMercadoLivre(): Promise<string | null> {
+  const clientId = process.env.ML_CLIENT_ID;
+  const clientSecret = process.env.ML_CLIENT_SECRET;
+
+  if (!clientId || !clientSecret) {
+    return null;
+  }
+
+  const now = Date.now();
+  // Se o token em cache ainda for válido com margem de segurança de 60s, reutiliza
+  if (cachedMLToken && cachedMLToken.expiresAt > now + 60 * 1000) {
+    return cachedMLToken.token;
+  }
+
+  try {
+    const params = new URLSearchParams({
+      grant_type: "client_credentials",
+      client_id: clientId.trim(),
+      client_secret: clientSecret.trim(),
+    });
+
+    const res = await fetch("https://api.mercadolibre.com/oauth/token", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Accept: "application/json",
+      },
+    });
+
+    if (!res.ok) {
+      const errText = await res.text().catch(() => "");
+      console.warn("Aviso ao obter Access Token OAuth do Mercado Livre:", res.status, errText);
+      return null;
+    }
+
+    const data = await res.json();
+    const token = data.access_token;
+    const expiresIn = Number(data.expires_in) || 21600; // Padrão 6 horas
+
+    if (token) {
+      cachedMLToken = {
+        token,
+        expiresAt: now + expiresIn * 1000,
+      };
+      return token;
+    }
+  } catch (err) {
+    console.warn("Falha ao comunicar com endpoint OAuth do Mercado Livre:", err);
+  }
+
+  return null;
+}
+
+/**
+ * Retorna os cabeçalhos padrão para chamadas à API do Mercado Livre,
+ * injetando 'Authorization: Bearer <token>' caso as credenciais estejam disponíveis.
+ */
+export async function obterHeadersApiML(): Promise<Record<string, string>> {
+  const headers: Record<string, string> = {
+    "User-Agent":
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    Accept: "application/json",
+    "Accept-Language": "pt-BR,pt;q=0.9",
+  };
+
+  const token = await obterTokenMercadoLivre();
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+
+  return headers;
+}
+
+/**
+ * Consulta os detalhes de um item diretamente na API oficial do Mercado Livre
+ * @param itemId ID do produto (ex: "MLB123456789" ou "MLB-123456789")
+ */
+export async function consultarDetalhesItemML(itemId: string): Promise<MLSearchResultItem | null> {
+  const cleanId = itemId.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+  if (!cleanId.startsWith("MLB")) return null;
+
+  try {
+    const headers = await obterHeadersApiML();
+    const res = await fetch(`https://api.mercadolibre.com/items/${cleanId}`, {
+      headers,
+      next: { revalidate: 60 },
+    });
+
+    if (res.status === 429 || res.status === 403) {
+      console.error("Bloqueio/Rate Limit ML (items):", res.statusText || `${res.status}`);
+      return null;
+    }
+
+    if (!res.ok) {
+      return null;
+    }
+
+    const item = await res.json();
+    return item as MLSearchResultItem;
+  } catch (err) {
+    console.warn(`Aviso ao consultar detalhes do item ${cleanId} na API do ML:`, err);
+    return null;
+  }
+}
 
 /**
  * Consulta a API do Mercado Livre buscando pelo menor preço real com entrega Full
@@ -263,9 +373,10 @@ export async function buscarProdutoML(query: string): Promise<ProdutoMLExtraido 
   try {
     const queryEncoded = encodeURIComponent(queryLimpa);
     let apiUrl = `https://api.mercadolibre.com/sites/MLB/search?q=${queryEncoded}&shipping_highlighted=fulfillment&limit=5`;
+    const headers = await obterHeadersApiML();
 
     let res = await fetch(apiUrl, {
-      headers: ML_API_HEADERS,
+      headers,
       next: { revalidate: 60 },
     });
 
@@ -299,7 +410,7 @@ export async function buscarProdutoML(query: string): Promise<ProdutoMLExtraido 
       apiUrl = `https://api.mercadolibre.com/sites/MLB/search?q=${queryEncoded}&limit=5`;
 
       res = await fetch(apiUrl, {
-        headers: ML_API_HEADERS,
+        headers,
         next: { revalidate: 60 },
       });
 
@@ -387,6 +498,15 @@ export async function buscarProdutoML(query: string): Promise<ProdutoMLExtraido 
       const cleanProductUrl = allHrefs[0].split("#")[0].split("?")[0];
       const idMatch = cleanProductUrl.match(/MLB-?(\d+)/i) || cleanProductUrl.match(/MLBU-?(\d+)/i);
       const mlbId = idMatch ? `MLB${idMatch[1]}` : "MLB-PRODUTO";
+
+      // Tenta obter os dados oficiais do item via API do Mercado Livre com Token OAuth
+      if (idMatch) {
+        const itemApi = await consultarDetalhesItemML(`MLB${idMatch[1]}`);
+        if (itemApi && itemApi.price > 0) {
+          if (!itemApi.permalink) itemApi.permalink = cleanProductUrl;
+          return processarItemML(itemApi, queryLimpa);
+        }
+      }
 
       let title = queryLimpa;
       let highResImg = "";
