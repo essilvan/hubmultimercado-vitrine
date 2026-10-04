@@ -26,14 +26,14 @@ export async function POST(request: NextRequest) {
 
     if (!query || typeof query !== "string" || !query.trim()) {
       return NextResponse.json(
-        { success: false, error: "Informe o código ou nome da peça para buscar (ex: SYL 1092 ou LUK 620 3268 00 HB20)." },
+        { success: false, error: "Informe o código ou nome da peça para buscar (ex: LUK 620 3268 00 HB20)." },
         { status: 400 }
       );
     }
 
     const queryLimpa = query.trim();
 
-    // 1. Busca produto via API do Mercado Livre priorizando menor preço e Full
+    // 1. Busca produto via API do Mercado Livre (ou fallback de busca)
     const resultado = await buscarProdutoML(queryLimpa);
 
     if (!resultado || !resultado.produtoProntoParaSalvar) {
@@ -61,36 +61,11 @@ export async function POST(request: NextRequest) {
     // 2. Salva / Upsert direto no Supabase (tabela produtos_afiliados)
     const supabase = getSupabaseClient();
 
-    // Objeto limpo estritamente mapeado com as colunas reais da tabela produtos_afiliados
-    const recordParaSalvar = {
-      titulo: produtoDados.titulo,
-      slug: produtoDados.slug,
-      codigo_fabricante: produtoDados.codigo_fabricante,
-      marca: produtoDados.marca, // Marca oficial (ex: "SYL")
-      categoria: produtoDados.categoria || "Autopeças",
-      veiculos_compativeis: produtoDados.veiculos_compativeis || "Consulte compatibilidade no anúncio",
-      codigo_oem: produtoDados.codigo_oem || null,
-      busca_ml: produtoDados.busca_ml || queryLimpa,
-      preco_estimado: produtoDados.preco_estimado, // Preço promocional real (ex: "R$ 31,92")
-      preco_antigo: produtoDados.preco_antigo || null, // Preço original cheio (ex: "R$ 39,90" ou null)
-      desconto_percentual: produtoDados.desconto_percentual || null, // Selo de desconto (ex: "20% OFF" ou null)
-      imagem_url: produtoDados.imagem_url || null,
-      link_afiliado: produtoDados.link_afiliado || null,
-      especificacoes: {
-        ...(produtoDados.especificacoes || {}),
-        marca: produtoDados.marca,
-        preco: produtoDados.preco_estimado,
-        preco_antigo: produtoDados.preco_antigo || null,
-        desconto_percentual: produtoDados.desconto_percentual || null,
-      },
-      updated_at: new Date().toISOString(),
-    };
-
     // Verifica se já existe um produto com o mesmo slug ou código
     const { data: existente } = await supabase
       .from("produtos_afiliados")
       .select("id, slug")
-      .or(`slug.eq.${recordParaSalvar.slug},codigo_fabricante.eq.${recordParaSalvar.codigo_fabricante}`)
+      .or(`slug.eq.${produtoDados.slug},codigo_fabricante.eq.${produtoDados.codigo_fabricante}`)
       .limit(1)
       .maybeSingle();
 
@@ -99,7 +74,10 @@ export async function POST(request: NextRequest) {
     if (existente && existente.id) {
       const { data, error } = await supabase
         .from("produtos_afiliados")
-        .update(recordParaSalvar)
+        .update({
+          ...produtoDados,
+          updated_at: new Date().toISOString(),
+        })
         .eq("id", existente.id)
         .select()
         .single();
@@ -112,8 +90,9 @@ export async function POST(request: NextRequest) {
       const { data, error } = await supabase
         .from("produtos_afiliados")
         .insert({
-          ...recordParaSalvar,
+          ...produtoDados,
           created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
         })
         .select()
         .single();
@@ -127,10 +106,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({
       success: true,
       message: `Produto "${produtoSalvo.titulo}" cadastrado com sucesso na vitrine!`,
-      produto: {
-        ...produtoSalvo,
-        preco: produtoSalvo.preco_estimado,
-      },
+      produto: produtoSalvo,
       resultadoML: resultado,
     });
   } catch (err: unknown) {
