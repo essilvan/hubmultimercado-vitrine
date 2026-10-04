@@ -13,7 +13,6 @@ import {
   RefreshCw,
   SlidersHorizontal,
   Car,
-  Settings,
   Sparkles,
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
@@ -156,14 +155,6 @@ export default function Home() {
             >
               <Sparkles className="w-3.5 h-3.5 fill-zinc-950" />
               <span>Cotação com IA</span>
-            </Link>
-
-            <Link
-              href="/admin"
-              className="inline-flex items-center gap-2 px-3.5 py-2 text-xs font-semibold rounded-xl bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-800 dark:hover:bg-zinc-700 text-zinc-800 dark:text-zinc-200 transition-colors"
-            >
-              <Settings className="w-3.5 h-3.5" />
-              <span>Painel Admin</span>
             </Link>
           </div>
         </div>

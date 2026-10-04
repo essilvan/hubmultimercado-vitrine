@@ -14,7 +14,6 @@ import {
   RefreshCw,
   Zap,
   Wrench,
-  Settings,
   ArrowRight,
   X,
   Tag,
@@ -190,13 +189,6 @@ export default function OrcamentoPage() {
               className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition"
             >
               <span>Ver Vitrine</span>
-            </Link>
-            <Link
-              href="/admin"
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-700 transition"
-            >
-              <Settings className="w-3.5 h-3.5" />
-              <span>Admin</span>
             </Link>
           </div>
         </div>
