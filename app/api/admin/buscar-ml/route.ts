@@ -114,6 +114,9 @@ export async function POST(request: NextRequest) {
       desconto_percentual: produtoDados.desconto_percentual || null, // Selo de desconto (ex: "20% OFF" ou null)
       imagem_url: produtoDados.imagem_url || null,
       link_afiliado: produtoDados.link_afiliado || null,
+      descricao: produtoDados.descricao || produtoDados.especificacoes?.descricao_completa || null,
+      aplicacao: produtoDados.aplicacao || produtoDados.especificacoes?.aplicacao || [],
+      palavras_chave: produtoDados.palavras_chave || produtoDados.especificacoes?.palavras_chave || [],
       especificacoes: {
         ...(produtoDados.especificacoes || {}),
         marca: produtoDados.marca,
@@ -122,6 +125,7 @@ export async function POST(request: NextRequest) {
         desconto_percentual: produtoDados.desconto_percentual || null,
         aplicacao: produtoDados.especificacoes?.aplicacao || [],
         compatibility: produtoDados.especificacoes?.compatibility || "",
+        palavras_chave: produtoDados.palavras_chave || produtoDados.especificacoes?.palavras_chave || [],
         dados_tecnicos: produtoDados.especificacoes?.dados_tecnicos || {},
       },
       updated_at: new Date().toISOString(),

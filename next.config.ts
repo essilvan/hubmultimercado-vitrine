@@ -19,6 +19,18 @@ const nextConfig: NextConfig = {
         protocol: "https",
         hostname: "**.mlstatic.com",
       },
+      {
+        protocol: "http",
+        hostname: "**.mlstatic.com",
+      },
+      {
+        protocol: "https",
+        hostname: "http2.mlstatic.com",
+      },
+      {
+        protocol: "http",
+        hostname: "http2.mlstatic.com",
+      },
     ],
   },
   serverExternalPackages: ["pdf-parse"],

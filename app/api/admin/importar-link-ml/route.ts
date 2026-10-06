@@ -4,6 +4,11 @@ import {
   extrairDescricaoHtml,
   extrairTabelaEspecificacoesHtml,
   extrairDadosDescricaoML,
+  extrairItemIdML,
+  consultarDetalhesItemML,
+  obterDescricaoItemML,
+  gerarPalavrasChave,
+  obterImagemAltaResolucao,
 } from "@/lib/mercadolivre";
 
 export const runtime = "nodejs";
@@ -386,6 +391,7 @@ export async function POST(request: NextRequest) {
 
     // 1. Efetuar fetch com cabeçalhos simulando navegador, com fallback para preview bot para contornar antibot
     let html = "";
+    let finalUrl = trimmedUrl;
 
     try {
       const res = await fetch(trimmedUrl, {
@@ -398,6 +404,10 @@ export async function POST(request: NextRequest) {
           "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
         },
       });
+
+      if (res.url) {
+        finalUrl = res.url;
+      }
 
       if (res.ok) {
         const bodyText = await res.text();
@@ -422,6 +432,11 @@ export async function POST(request: NextRequest) {
             "Accept-Language": "pt-BR,pt;q=0.9",
           },
         });
+
+        if (botRes.url) {
+          finalUrl = botRes.url;
+        }
+
         if (botRes.ok) {
           html = await botRes.text();
         }
@@ -434,20 +449,53 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         {
           success: false,
-          error: "Falha ao aceder ao anúncio do Mercado Livre. Verifique se o link está ativo e acessível.",
+          error: "Falha ao acessar o anúncio do Mercado Livre. Verifique se o link está ativo e acessível.",
         },
         { status: 422 }
       );
     }
 
-    // 2. Extração do Título
+    // 2. Extração do ID do item MLB (da URL original, final redirecionada ou do HTML)
+    let mlbId =
+      extrairItemIdML(trimmedUrl) ||
+      extrairItemIdML(finalUrl);
+
+    if (!mlbId) {
+      const mlbMatchInHtml =
+        html.match(/"item_id":\s*"(MLB\d+)"/i) ||
+        html.match(/item_id=(MLB\d+)/i) ||
+        html.match(/\b(MLB-?\d{8,14})\b/i);
+
+      if (mlbMatchInHtml && mlbMatchInHtml[1]) {
+        mlbId = mlbMatchInHtml[1].replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+      }
+    }
+
+    // 3. Consulta tanto os detalhes do item (/items/{id}) quanto a descrição (/items/{id}/description) na API do ML
+    let itemApi: any = null;
+    let descApi: string | null = null;
+
+    if (mlbId) {
+      try {
+        const [detalhesRes, descRes] = await Promise.all([
+          consultarDetalhesItemML(mlbId).catch(() => null),
+          obterDescricaoItemML(mlbId).catch(() => null),
+        ]);
+        itemApi = detalhesRes;
+        descApi = descRes;
+      } catch (apiErr) {
+        console.warn("Aviso ao consultar endpoints do Mercado Livre para o item:", mlbId, apiErr);
+      }
+    }
+
+    // 4. Extração do Título
     const titleMatch =
       html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i) ||
       html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:title["']/i) ||
       html.match(/<meta[^>]+name=["']twitter:title["'][^>]+content=["']([^"']+)["']/i) ||
       html.match(/<title>([^<]+)<\/title>/i);
 
-    let rawTitle = titleMatch && titleMatch[1] ? titleMatch[1].trim() : "";
+    let rawTitle = itemApi?.title || (titleMatch && titleMatch[1] ? titleMatch[1].trim() : "");
     rawTitle = rawTitle
       .replace(/\s*-\s*R\$\s*[\d.,]+\s*$/i, "")
       .replace(/\s*\|\s*Mercado\s*Livre.*$/i, "")
@@ -455,7 +503,6 @@ export async function POST(request: NextRequest) {
       .replace(/&amp;/g, "&")
       .trim();
 
-    // Se o título não foi encontrado no HTML, deduz a partir da URL
     if (!rawTitle) {
       const urlMatch = trimmedUrl.match(/MLB-?\d*-?([a-zA-Z0-9-]+)(?:-_JM|\?|$)/i);
       if (urlMatch && urlMatch[1]) {
@@ -469,23 +516,31 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // 3. Extração da Imagem
-    const ogImageMatch =
-      html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i) ||
-      html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i) ||
-      html.match(/<meta[^>]+name=["']twitter:image["'][^>]+content=["']([^"']+)["']/i);
-
+    // 5. Extração da Imagem em Alta Resolução
     let imageUrl: string | null = null;
-    if (ogImageMatch && ogImageMatch[1]) {
-      imageUrl = ogImageMatch[1].trim().replace(/&amp;/g, "&");
-    } else {
-      const jsonLdImgMatch = html.match(/"image":\s*"([^"]+)"/i);
-      if (jsonLdImgMatch && jsonLdImgMatch[1]) {
-        imageUrl = jsonLdImgMatch[1].replace(/\\u002F/g, "/");
+    if (itemApi?.thumbnail) {
+      imageUrl = obterImagemAltaResolucao(itemApi.thumbnail);
+    } else if (itemApi?.pictures && itemApi.pictures.length > 0) {
+      imageUrl = obterImagemAltaResolucao(itemApi.pictures[0]?.secure_url || itemApi.pictures[0]?.url);
+    }
+
+    if (!imageUrl) {
+      const ogImageMatch =
+        html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i) ||
+        html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i) ||
+        html.match(/<meta[^>]+name=["']twitter:image["'][^>]+content=["']([^"']+)["']/i);
+
+      if (ogImageMatch && ogImageMatch[1]) {
+        imageUrl = obterImagemAltaResolucao(ogImageMatch[1].trim().replace(/&amp;/g, "&"));
       } else {
-        const mlstaticMatch = html.match(/https:\/\/http2\.mlstatic\.com\/D_[^"'\s\)]+/i);
-        if (mlstaticMatch) {
-          imageUrl = mlstaticMatch[0].replace(/&amp;/g, "&");
+        const jsonLdImgMatch = html.match(/"image":\s*"([^"]+)"/i);
+        if (jsonLdImgMatch && jsonLdImgMatch[1]) {
+          imageUrl = obterImagemAltaResolucao(jsonLdImgMatch[1].replace(/\\u002F/g, "/"));
+        } else {
+          const mlstaticMatch = html.match(/https:\/\/http2\.mlstatic\.com\/D_[^"'\s\)]+/i);
+          if (mlstaticMatch) {
+            imageUrl = obterImagemAltaResolucao(mlstaticMatch[0].replace(/&amp;/g, "&"));
+          }
         }
       }
     }
@@ -494,25 +549,100 @@ export async function POST(request: NextRequest) {
       imageUrl = `https:${imageUrl}`;
     }
 
-    // 4. Extração Especializada de Preços (Atual promocional, Original e Desconto)
+    // 6. Extração de Preços (Atual promocional, Original e Desconto)
     const { precoEstimado, precoAntigo, descontoPercentual } = extrairPrecosMercadoLivre(html);
 
-    const precoEstimadoFormatado = precoEstimado;
-    const precoAntigoFormatado = precoAntigo;
+    let precoEstimadoFormatado = precoEstimado;
+    if (!precoEstimadoFormatado && itemApi?.price && itemApi.price > 0) {
+      precoEstimadoFormatado = formatBrl(itemApi.price);
+    }
 
-    // 5. Extração de Descrição, Tabela Técnica e Aplicação
-    const descricao = extrairDescricaoHtml(html);
+    let precoAntigoFormatado = precoAntigo;
+    if (!precoAntigoFormatado && itemApi?.original_price && itemApi.original_price > (itemApi.price || 0)) {
+      precoAntigoFormatado = formatBrl(itemApi.original_price);
+    }
+
+    // 7. Descrição Completa (plain_text da API oficial com fallback para HTML limpo)
+    const descricaoHtmlLimpa = extrairDescricaoHtml(html);
+    const descricaoCompleta = (descApi && descApi.trim()) ? descApi.trim() : (descricaoHtmlLimpa || "");
+
+    // 8. Atributos Técnicos (mesclagem de attributes da API e da tabela HTML)
     const tabelaAttrs = extrairTabelaEspecificacoesHtml(html);
+    const combinedAttrs: Record<string, string | undefined> = { ...tabelaAttrs };
+
+    if (Array.isArray(itemApi?.attributes)) {
+      for (const attr of itemApi.attributes) {
+        if (!attr.value_name) continue;
+        const key = attr.id ? attr.id.toUpperCase() : attr.name.toUpperCase();
+        combinedAttrs[key] = attr.value_name;
+      }
+    }
+
+    // Extração estruturada de aplicação e dados técnicos
     const { aplicacao, compatibility, dados_tecnicos } = extrairDadosDescricaoML(
-      descricao,
-      tabelaAttrs,
+      descricaoCompleta,
+      combinedAttrs,
       rawTitle
     );
 
-    const marca = dados_tecnicos.marca || deduzirMarca(rawTitle);
-    const codigo_fabricante = dados_tecnicos.codigo_fabricante || deduzirCodigo(rawTitle, marca);
+    // Mapeamento específico dos 7 atributos técnicos solicitados:
+    // MARCA, MODELO, MPN, OEM, LADO, POSICAO e NÚMERO DE PEÇA
+    const marca =
+      dados_tecnicos.marca ||
+      combinedAttrs["BRAND"] ||
+      combinedAttrs["MARCA"] ||
+      deduzirMarca(rawTitle) ||
+      "Auto Peças";
+
+    const modelo =
+      dados_tecnicos.modelo ||
+      combinedAttrs["MODEL"] ||
+      combinedAttrs["MODELO"] ||
+      undefined;
+
+    const mpn =
+      dados_tecnicos.mpn ||
+      combinedAttrs["MPN"] ||
+      combinedAttrs["MANUFACTURER_PART_NUMBER"] ||
+      combinedAttrs["PART_NUMBER"] ||
+      combinedAttrs["CODIGO_DE_FABRICANTE"] ||
+      combinedAttrs["CODIGO_FABRICANTE"];
+
+    const numeroPeca =
+      dados_tecnicos.numero_peca ||
+      combinedAttrs["NUMERO_DE_PECA"] ||
+      combinedAttrs["NÚMERO DE PEÇA"] ||
+      combinedAttrs["PART_NUMBER"] ||
+      combinedAttrs["PIECE_NUMBER"] ||
+      mpn ||
+      deduzirCodigo(rawTitle, marca);
+
+    const codigoFabricanteFinal = mpn || numeroPeca;
+
+    const oem =
+      dados_tecnicos.codigo_oem ||
+      combinedAttrs["OEM"] ||
+      combinedAttrs["OEM_PART_NUMBER"] ||
+      combinedAttrs["CÓDIGO OEM"] ||
+      combinedAttrs["CODIGO_OEM"] ||
+      null;
+
+    const lado =
+      dados_tecnicos.lado ||
+      combinedAttrs["SIDE"] ||
+      combinedAttrs["LADO"] ||
+      undefined;
+
+    const posicao =
+      dados_tecnicos.posicao ||
+      combinedAttrs["POSITION"] ||
+      combinedAttrs["POSIÇÃO"] ||
+      combinedAttrs["POSICAO"] ||
+      undefined;
+
     const categoria = deduzirCategoria(rawTitle);
 
+    // Veículos compatíveis sintetizados
     let veiculos_compativeis = deduzirVeiculos(rawTitle);
     if (aplicacao.length > 0) {
       if (aplicacao.length === 1) {
@@ -522,75 +652,136 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    const busca_ml = `${marca} ${codigo_fabricante}`.trim();
+    const busca_ml = `${marca} ${codigoFabricanteFinal}`.trim();
 
-    // 6. Geração de Slug
-    const baseSlug = generateSlug(`${marca}-${codigo_fabricante}-${rawTitle.slice(0, 40)}`);
+    // 9. Geração Automática da lista/array de 'palavras_chave' (keywords)
+    const palavrasChave = gerarPalavrasChave({
+      titulo: rawTitle,
+      descricao: descricaoCompleta,
+      marca,
+      modelo,
+      codigo_fabricante: codigoFabricanteFinal,
+      codigo_oem: oem,
+      aplicacao,
+      categoria,
+      atributos: combinedAttrs,
+    });
+
+    // 10. Geração de Slug
+    const baseSlug = generateSlug(`${marca}-${codigoFabricanteFinal}-${rawTitle.slice(0, 40)}`);
     const slug = `${baseSlug}-${Date.now().toString().slice(-4)}`;
 
-    // 7. Gravação na Tabela produtos_afiliados do Supabase
+    // 11. Gravação na Tabela produtos_afiliados do Supabase
     const supabase = getSupabaseClient();
+
+    const dadosTecnicosCompletos = {
+      ...dados_tecnicos,
+      marca,
+      modelo,
+      mpn,
+      numero_peca: numeroPeca,
+      codigo_fabricante: codigoFabricanteFinal,
+      codigo_oem: oem || undefined,
+      lado,
+      posicao,
+      medidas: dados_tecnicos.medidas || dados_tecnicos.diametro,
+      material: dados_tecnicos.material || dados_tecnicos.composicao,
+      composicao: dados_tecnicos.composicao || dados_tecnicos.material,
+    };
+
+    const especificacoesJsonb = {
+      ml_id: mlbId || undefined,
+      link_afiliado: trimmedUrl,
+      link_ml: trimmedUrl,
+      link_destino: trimmedUrl,
+      marca,
+      modelo,
+      mpn,
+      numero_peca: numeroPeca,
+      codigo_fabricante: codigoFabricanteFinal,
+      codigo_oem: oem || undefined,
+      lado,
+      posicao,
+      medidas: dadosTecnicosCompletos.medidas,
+      composicao: dadosTecnicosCompletos.composicao,
+      preco: precoEstimadoFormatado,
+      preco_antigo: precoAntigoFormatado,
+      desconto_percentual: descontoPercentual,
+      aplicacao,
+      compatibility,
+      palavras_chave: palavrasChave,
+      dados_tecnicos: dadosTecnicosCompletos,
+      descricao_completa: descricaoCompleta || undefined,
+      atributos_ml: combinedAttrs,
+      ultima_sincronizacao: new Date().toISOString(),
+    };
 
     const recordData: Record<string, unknown> = {
       titulo: rawTitle,
       slug,
       marca,
-      codigo_fabricante,
+      codigo_fabricante: codigoFabricanteFinal,
       preco_estimado: precoEstimadoFormatado,
       imagem_url: imageUrl,
       busca_ml,
       categoria,
       veiculos_compativeis,
-      codigo_oem: dados_tecnicos.codigo_oem || null,
-      especificacoes: {
-        link_afiliado: trimmedUrl,
-        link_ml: trimmedUrl,
-        link_destino: trimmedUrl,
-        marca,
-        preco: precoEstimadoFormatado,
-        preco_antigo: precoAntigoFormatado,
-        desconto_percentual: descontoPercentual,
-        aplicacao,
-        compatibility,
-        dados_tecnicos: {
-          ...dados_tecnicos,
-          codigo_fabricante,
-          marca,
-        },
-        descricao_completa: descricao || undefined,
-        atributos_ml: tabelaAttrs,
-        ultima_sincronizacao: new Date().toISOString(),
-      },
+      codigo_oem: oem,
+      descricao: descricaoCompleta || null,
+      aplicacao: aplicacao,
+      palavras_chave: palavrasChave,
+      especificacoes: especificacoesJsonb,
+      link_afiliado: trimmedUrl,
+      preco_antigo: precoAntigoFormatado,
+      desconto_percentual: descontoPercentual,
+      updated_at: new Date().toISOString(),
     };
 
-    // Tenta gravar com as colunas dedicadas caso existam no banco
+    // Tenta gravar com as colunas completas
     let insertResult = await supabase
       .from("produtos_afiliados")
-      .upsert(
-        {
-          ...recordData,
-          link_afiliado: trimmedUrl,
-          preco_antigo: precoAntigoFormatado,
-          desconto_percentual: descontoPercentual,
-          aplicacao: aplicacao,
-          compatibility: compatibility,
-        },
-        { onConflict: "slug" }
-      )
+      .upsert(recordData, { onConflict: "slug" })
       .select()
       .single();
 
-    // Se alguma coluna específica não existir no banco (código 42703, PGRST204 ou erro de schema cache)
-    if (
-      insertResult.error &&
-      (insertResult.error.code === "42703" ||
-        insertResult.error.code === "PGRST204" ||
-        insertResult.error.message?.toLowerCase().includes("column") ||
-        insertResult.error.message?.toLowerCase().includes("schema cache"))
-    ) {
+    // Se houver restrição de tipo ou schema cache, faz tentativa adaptativa
+    if (insertResult.error) {
+      console.warn("Primeira tentativa de upsert no Supabase:", insertResult.error.message);
+
+      // Tenta com aplicacao e palavras_chave como string se a coluna no banco for do tipo TEXT
+      const recordAdaptativo = {
+        ...recordData,
+        aplicacao: Array.isArray(aplicacao) ? aplicacao.join("\n") : aplicacao,
+        palavras_chave: Array.isArray(palavrasChave) ? palavrasChave.join(", ") : palavrasChave,
+      };
+
       insertResult = await supabase
         .from("produtos_afiliados")
-        .upsert(recordData, { onConflict: "slug" })
+        .upsert(recordAdaptativo, { onConflict: "slug" })
+        .select()
+        .single();
+    }
+
+    // Se ainda houver erro de coluna inexistente, salva campos essenciais preservando tudo em 'especificacoes'
+    if (insertResult.error) {
+      const fallbackRecord: Record<string, unknown> = {
+        titulo: rawTitle,
+        slug,
+        marca,
+        codigo_fabricante: codigoFabricanteFinal,
+        preco_estimado: precoEstimadoFormatado,
+        imagem_url: imageUrl,
+        busca_ml,
+        categoria,
+        veiculos_compativeis,
+        codigo_oem: oem,
+        especificacoes: especificacoesJsonb,
+        updated_at: new Date().toISOString(),
+      };
+
+      insertResult = await supabase
+        .from("produtos_afiliados")
+        .upsert(fallbackRecord, { onConflict: "slug" })
         .select()
         .single();
     }
@@ -606,9 +797,12 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Anexa as propriedades de preço para resposta consistente ao frontend
     const produtoRetornado = {
       ...insertResult.data,
+      descricao: descricaoCompleta,
+      aplicacao: aplicacao,
+      palavras_chave: palavrasChave,
+      codigo_fabricante: codigoFabricanteFinal,
       preco_antigo: (insertResult.data as Record<string, unknown>)?.preco_antigo || precoAntigoFormatado,
       desconto_percentual: (insertResult.data as Record<string, unknown>)?.desconto_percentual || descontoPercentual,
     };
@@ -619,13 +813,22 @@ export async function POST(request: NextRequest) {
       dadosExtraidos: {
         titulo: rawTitle,
         marca,
-        codigo_fabricante,
+        modelo,
+        codigo_fabricante: codigoFabricanteFinal,
+        mpn,
+        numero_peca: numeroPeca,
+        codigo_oem: oem,
+        lado,
+        posicao,
         preco_estimado: precoEstimadoFormatado,
         preco_antigo: precoAntigoFormatado,
         desconto_percentual: descontoPercentual,
         imagem_url: imageUrl,
         categoria,
         slug,
+        descricao: descricaoCompleta,
+        aplicacao,
+        palavras_chave: palavrasChave,
       },
     });
   } catch (error: unknown) {

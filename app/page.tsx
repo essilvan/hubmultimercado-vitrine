@@ -1,7 +1,8 @@
 "use client";
 
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useTransition } from "react";
 import Link from "next/link";
+import Image from "next/image";
 import {
   Search,
   Zap,
@@ -14,10 +15,13 @@ import {
   SlidersHorizontal,
   Car,
   Sparkles,
+  ChevronLeft,
+  ChevronRight,
+  ShieldCheck,
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 
-export interface ProdutoAfiliado {
+export interface ProdutoCard {
   id?: string;
   titulo: string;
   slug: string;
@@ -27,23 +31,15 @@ export interface ProdutoAfiliado {
   veiculos_compativeis?: string | null;
   codigo_oem?: string | null;
   busca_ml?: string | null;
-  preco?: number | string | null;
   preco_estimado?: number | string | null;
   preco_antigo?: string | null;
   desconto_percentual?: string | null;
   imagem_url?: string | null;
   link_afiliado?: string | null;
-  especificacoes?: {
-    preco?: string;
-    preco_antigo?: string;
-    desconto_percentual?: string;
-    link_afiliado?: string;
-    link_ml?: string;
-    link_destino?: string;
-    [key: string]: unknown;
-  } | null;
   created_at?: string;
 }
+
+const PAGE_SIZE = 24;
 
 function formatPriceDisplay(value: number | string | null | undefined): string {
   if (value === null || value === undefined || value === "") return "";
@@ -60,74 +56,137 @@ function formatPriceDisplay(value: number | string | null | undefined): string {
 }
 
 export default function Home() {
-  const [products, setProducts] = useState<ProdutoAfiliado[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [searchQuery, setSearchQuery] = useState("");
+  const [products, setProducts] = useState<ProdutoCard[]>([]);
+  const [totalCount, setTotalCount] = useState<number>(0);
+  const [currentPage, setCurrentPage] = useState<number>(1);
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [searchQuery, setSearchQuery] = useState<string>("");
+  const [debouncedQuery, setDebouncedQuery] = useState<string>("");
   const [activeCategory, setActiveCategory] = useState<string>("todos");
+  const [availableCategories, setAvailableCategories] = useState<string[]>([]);
+  const [, startTransition] = useTransition();
 
-  // Carrega produtos dinamicamente do Supabase
-  const fetchProducts = async () => {
+  // Debounce da busca digitada para evitar queries desnecessárias
+  useEffect(() => {
+    const handler = setTimeout(() => {
+      setDebouncedQuery(searchQuery.trim());
+      setCurrentPage(1);
+    }, 350);
+
+    return () => clearTimeout(handler);
+  }, [searchQuery]);
+
+  // Carrega lista única de categorias leves
+  useEffect(() => {
+    async function loadCategories() {
+      try {
+        const { data } = await supabase
+          .from("produtos_afiliados")
+          .select("categoria")
+          .not("categoria", "is", null);
+
+        if (data) {
+          const cats = new Set<string>();
+          data.forEach((p) => {
+            if (p.categoria && p.categoria.trim()) {
+              cats.add(p.categoria.trim());
+            }
+          });
+          setAvailableCategories(Array.from(cats).sort());
+        }
+      } catch (err) {
+        console.error("Erro ao carregar categorias únicas:", err);
+      }
+    }
+    loadCategories();
+  }, []);
+
+  // Busca paginada no Supabase trazendo APENAS as colunas necessárias para os cards
+  const fetchProducts = useCallback(async () => {
     setIsLoading(true);
     try {
-      const { data, error } = await supabase
+      const from = (currentPage - 1) * PAGE_SIZE;
+      const to = from + PAGE_SIZE - 1;
+
+      let query = supabase
         .from("produtos_afiliados")
-        .select("*")
-        .order("created_at", { ascending: false });
+        .select(
+          "id, titulo, slug, codigo_fabricante, marca, categoria, veiculos_compativeis, codigo_oem, busca_ml, preco_estimado, preco_antigo, desconto_percentual, imagem_url, link_afiliado, created_at",
+          { count: "exact" }
+        )
+        .order("created_at", { ascending: false })
+        .range(from, to);
+
+      if (activeCategory !== "todos") {
+        query = query.eq("categoria", activeCategory);
+      }
+
+      if (debouncedQuery) {
+        const q = debouncedQuery;
+        // Filtro otimizado no Supabase por título, marca, código de fabricante, OEM ou compatibilidade
+        query = query.or(
+          `titulo.ilike.%${q}%,marca.ilike.%${q}%,codigo_fabricante.ilike.%${q}%,codigo_oem.ilike.%${q}%,veiculos_compativeis.ilike.%${q}%,busca_ml.ilike.%${q}%`
+        );
+      }
+
+      const { data, count, error } = await query;
 
       if (error) {
-        console.error("Falha ao buscar produtos no Supabase:", error);
-      } else if (data) {
-        setProducts(data as ProdutoAfiliado[]);
+        console.error("Erro na consulta paginada do Supabase:", error);
+      } else {
+        setProducts((data as ProdutoCard[]) || []);
+        setTotalCount(count || 0);
       }
     } catch (err) {
-      console.error("Erro de conexão ao carregar vitrine:", err);
+      console.error("Erro ao carregar produtos:", err);
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [currentPage, activeCategory, debouncedQuery]);
 
   useEffect(() => {
     fetchProducts();
-  }, []);
+  }, [fetchProducts]);
 
-  // Lista única de categorias para filtros rápidos
-  const availableCategories = useMemo(() => {
-    const cats = new Set<string>();
-    products.forEach((p) => {
-      if (p.categoria?.trim()) cats.add(p.categoria.trim());
-    });
-    return Array.from(cats);
-  }, [products]);
+  const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
 
-  // Filtro de busca em tempo real
-  const filteredProducts = useMemo(() => {
-    return products.filter((item) => {
-      if (activeCategory !== "todos" && item.categoria?.toLowerCase() !== activeCategory.toLowerCase()) {
-        return false;
+  const handlePageChange = (newPage: number) => {
+    if (newPage < 1 || newPage > totalPages || newPage === currentPage) return;
+    startTransition(() => {
+      setCurrentPage(newPage);
+      if (typeof window !== "undefined") {
+        window.scrollTo({ top: 340, behavior: "smooth" });
       }
-
-      if (!searchQuery.trim()) return true;
-      const q = searchQuery.toLowerCase().trim();
-
-      const matchTitulo = item.titulo?.toLowerCase().includes(q);
-      const matchMarca = item.marca?.toLowerCase().includes(q);
-      const matchCodigoFab = item.codigo_fabricante?.toLowerCase().includes(q);
-      const matchCodigoOem = item.codigo_oem?.toLowerCase().includes(q);
-      const matchVeiculos = item.veiculos_compativeis?.toLowerCase().includes(q);
-      const matchBuscaMl = item.busca_ml?.toLowerCase().includes(q);
-      const matchCategoria = item.categoria?.toLowerCase().includes(q);
-
-      return (
-        matchTitulo ||
-        matchMarca ||
-        matchCodigoFab ||
-        matchCodigoOem ||
-        matchVeiculos ||
-        matchBuscaMl ||
-        matchCategoria
-      );
     });
-  }, [products, searchQuery, activeCategory]);
+  };
+
+  // Gerador de páginas para a paginação numérica
+  const renderPaginationButtons = () => {
+    const pages: (number | string)[] = [];
+    const maxVisible = 5;
+
+    if (totalPages <= maxVisible + 2) {
+      for (let i = 1; i <= totalPages; i++) {
+        pages.push(i);
+      }
+    } else {
+      pages.push(1);
+      const start = Math.max(2, currentPage - 1);
+      const end = Math.min(totalPages - 1, currentPage + 1);
+
+      if (start > 2) pages.push("...");
+      for (let i = start; i <= end; i++) {
+        pages.push(i);
+      }
+      if (end < totalPages - 1) pages.push("...");
+      pages.push(totalPages);
+    }
+
+    return pages;
+  };
+
+  const startProductNumber = totalCount === 0 ? 0 : (currentPage - 1) * PAGE_SIZE + 1;
+  const endProductNumber = Math.min(totalCount, currentPage * PAGE_SIZE);
 
   return (
     <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 flex flex-col">
@@ -204,7 +263,10 @@ export default function Home() {
             <div className="flex flex-wrap items-center justify-center gap-2 mt-4 text-xs font-medium">
               <button
                 type="button"
-                onClick={() => setActiveCategory("todos")}
+                onClick={() => {
+                  setActiveCategory("todos");
+                  setCurrentPage(1);
+                }}
                 className={`px-3 py-1.5 rounded-full transition-colors cursor-pointer ${
                   activeCategory === "todos"
                     ? "bg-zinc-900 text-white dark:bg-white dark:text-zinc-900 font-semibold"
@@ -217,7 +279,10 @@ export default function Home() {
                 <button
                   key={cat}
                   type="button"
-                  onClick={() => setActiveCategory(cat)}
+                  onClick={() => {
+                    setActiveCategory(cat);
+                    setCurrentPage(1);
+                  }}
                   className={`px-3 py-1.5 rounded-full transition-colors cursor-pointer ${
                     activeCategory.toLowerCase() === cat.toLowerCase()
                       ? "bg-zinc-900 text-white dark:bg-white dark:text-zinc-900 font-semibold"
@@ -254,12 +319,17 @@ export default function Home() {
           <div className="flex items-center gap-2">
             <SlidersHorizontal className="w-4 h-4 text-zinc-500" />
             <span className="text-sm font-semibold text-zinc-800 dark:text-zinc-200">
-              {filteredProducts.length}{" "}
-              {filteredProducts.length === 1 ? "peça disponível" : "peças disponíveis"}
+              {totalCount > 0 ? (
+                <>
+                  Exibindo {startProductNumber} - {endProductNumber} de {totalCount} {totalCount === 1 ? "peça" : "peças"}
+                </>
+              ) : (
+                "Nenhuma peça encontrada"
+              )}
             </span>
-            {searchQuery && (
+            {debouncedQuery && (
               <span className="text-xs text-zinc-500">
-                para &quot;<strong>{searchQuery}</strong>&quot;
+                para &quot;<strong>{debouncedQuery}</strong>&quot;
               </span>
             )}
           </div>
@@ -284,9 +354,9 @@ export default function Home() {
         {isLoading ? (
           <div className="py-24 flex flex-col items-center justify-center gap-3">
             <RefreshCw className="w-8 h-8 text-amber-500 animate-spin" />
-            <p className="text-sm text-zinc-500">Carregando catálogo técnico do Supabase...</p>
+            <p className="text-sm text-zinc-500">Carregando peças em alta velocidade...</p>
           </div>
-        ) : filteredProducts.length === 0 ? (
+        ) : products.length === 0 ? (
           <div className="py-20 text-center space-y-4">
             <div className="w-16 h-16 mx-auto rounded-2xl bg-zinc-100 dark:bg-zinc-800 flex items-center justify-center text-zinc-400">
               <Package className="w-8 h-8" />
@@ -296,7 +366,7 @@ export default function Home() {
                 Nenhum produto encontrado
               </h3>
               <p className="text-sm text-zinc-500 max-w-sm mx-auto">
-                Não localizamos peças para &quot;{searchQuery}&quot;. Tente buscar por modelo de veículo ou código da peça.
+                Não localizamos peças para &quot;{debouncedQuery}&quot;. Tente buscar por modelo de veículo ou código da peça.
               </p>
             </div>
             <button
@@ -304,6 +374,7 @@ export default function Home() {
               onClick={() => {
                 setSearchQuery("");
                 setActiveCategory("todos");
+                setCurrentPage(1);
               }}
               className="px-4 py-2 text-xs font-semibold rounded-xl bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900 hover:opacity-90 transition cursor-pointer"
             >
@@ -312,72 +383,47 @@ export default function Home() {
           </div>
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
-            {filteredProducts.map((produto) => {
-              // Determina link de compra
-              const directAffiliateLink =
-                produto.link_afiliado ||
-                produto.especificacoes?.link_afiliado ||
-                produto.especificacoes?.link_ml ||
-                produto.especificacoes?.link_destino;
-
+            {products.map((produto) => {
+              // Determina link de afiliado oficial
               const buyUrl =
-                directAffiliateLink && directAffiliateLink.trim()
-                  ? directAffiliateLink.trim()
+                produto.link_afiliado && produto.link_afiliado.trim()
+                  ? produto.link_afiliado.trim()
                   : `/api/redirect?query=${encodeURIComponent(
                       produto.busca_ml || `${produto.marca} ${produto.codigo_fabricante}`
                     )}`;
 
               // Extração de valores de preço
-              const precoAtual =
-                formatPriceDisplay(produto.preco) ||
-                formatPriceDisplay(produto.preco_estimado) ||
-                null;
-
-              const precoAntigo =
-                (produto.preco_antigo && formatPriceDisplay(produto.preco_antigo)) ||
-                (produto.especificacoes?.preco_antigo &&
-                  formatPriceDisplay(produto.especificacoes.preco_antigo)) ||
-                null;
-
-              const descontoPercentual =
-                produto.desconto_percentual ||
-                produto.especificacoes?.desconto_percentual ||
-                null;
+              const precoAtual = formatPriceDisplay(produto.preco_estimado);
+              const precoAntigo = produto.preco_antigo ? formatPriceDisplay(produto.preco_antigo) : null;
+              const descontoPercentual = produto.desconto_percentual || null;
 
               return (
                 <div
                   key={produto.id || produto.slug}
                   className="group flex flex-col rounded-2xl bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 shadow-sm hover:shadow-md hover:border-amber-400 dark:hover:border-amber-500/50 transition-all overflow-hidden"
                 >
-                  {/* Foto Real Importada da Peça */}
+                  {/* Foto Real Otimizada com next/image */}
                   <div className="relative aspect-[16/10] bg-zinc-100 dark:bg-zinc-800/80 flex items-center justify-center overflow-hidden border-b border-zinc-100 dark:border-zinc-800">
                     {produto.imagem_url ? (
-                      /* eslint-disable-next-line @next/next/no-img-element */
-                      <img
+                      <Image
                         src={produto.imagem_url}
                         alt={produto.titulo}
-                        className="w-full h-full object-contain p-3 group-hover:scale-105 transition-transform duration-300"
-                        onError={(e) => {
-                          (e.target as HTMLElement).style.display = "none";
-                          const fallback = (e.target as HTMLElement).parentElement?.querySelector(".img-fallback");
-                          if (fallback) fallback.classList.remove("hidden");
-                        }}
+                        fill
+                        sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw"
+                        className="object-contain p-3 group-hover:scale-105 transition-transform duration-300"
+                        loading="lazy"
                       />
-                    ) : null}
-
-                    <div
-                      className={`img-fallback flex flex-col items-center justify-center gap-2 text-zinc-400 p-6 text-center ${
-                        produto.imagem_url ? "hidden" : "flex"
-                      }`}
-                    >
-                      <Package className="w-10 h-10 text-zinc-300 dark:text-zinc-700 group-hover:text-amber-500 transition-colors" />
-                      <span className="text-[11px] font-medium text-zinc-400">
-                        {produto.marca} - {produto.categoria || "Autopeça"}
-                      </span>
-                    </div>
+                    ) : (
+                      <div className="flex flex-col items-center justify-center gap-2 text-zinc-400 p-6 text-center">
+                        <Package className="w-10 h-10 text-zinc-300 dark:text-zinc-700 group-hover:text-amber-500 transition-colors" />
+                        <span className="text-[11px] font-medium text-zinc-400">
+                          {produto.marca} - {produto.categoria || "Autopeça"}
+                        </span>
+                      </div>
+                    )}
 
                     {/* Marca oficial destacada no topo sobre a imagem */}
-                    <div className="absolute top-3 left-3 flex items-center gap-1.5 z-10">
+                    <div className="absolute top-3 left-3 flex items-center gap-1.5 z-10 pointer-events-none">
                       <span className="px-2.5 py-1 rounded-md text-xs font-black uppercase tracking-wider bg-amber-400 text-zinc-950 shadow-md">
                         {produto.marca}
                       </span>
@@ -390,7 +436,7 @@ export default function Home() {
 
                     {/* Selo de desconto flutuante sobre a imagem */}
                     {descontoPercentual && (
-                      <div className="absolute top-3 right-3 px-2 py-0.5 rounded-md text-xs font-black bg-green-600 text-white shadow-md z-10">
+                      <div className="absolute top-3 right-3 px-2 py-0.5 rounded-md text-xs font-black bg-emerald-600 text-white shadow-md z-10 pointer-events-none">
                         {descontoPercentual}
                       </div>
                     )}
@@ -416,7 +462,7 @@ export default function Home() {
                       {/* Título com link para a página de SEO */}
                       <Link
                         href={`/peca/${produto.slug}`}
-                        className="group-hover:text-amber-500 transition"
+                        className="group-hover:text-amber-500 transition block"
                       >
                         <h2 className="text-base font-bold text-zinc-900 dark:text-zinc-100 leading-snug line-clamp-2">
                           {produto.titulo}
@@ -437,7 +483,7 @@ export default function Home() {
                       )}
                     </div>
 
-                    {/* BLOCO DE PREÇO ATUALIZADO */}
+                    {/* BLOCO DE PREÇO & CONVERSÃO */}
                     <div className="space-y-3 pt-2">
                       <div className="p-3.5 rounded-xl bg-zinc-50/90 dark:bg-zinc-950/80 border border-zinc-200/70 dark:border-zinc-800 space-y-1.5">
                         {/* Se houver preço antigo ou desconto percentual */}
@@ -449,47 +495,66 @@ export default function Home() {
                               </span>
                             )}
                             {descontoPercentual && (
-                              <span className="bg-green-100 text-green-700 font-bold text-xs px-1.5 py-0.5 rounded">
+                              <span className="bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 font-bold text-xs px-1.5 py-0.5 rounded">
                                 {descontoPercentual}
                               </span>
                             )}
                           </div>
                         )}
 
-                        {/* Preço atual em destaque grande em verde */}
+                        {/* Preço atual com selo Full */}
                         {precoAtual ? (
-                          <div className="flex items-baseline gap-2">
-                            <span className="text-xl font-bold text-green-600">
-                              {precoAtual}
-                            </span>
-                            <span className="text-[11px] font-semibold text-zinc-500">
-                              no Mercado Livre
+                          <div className="flex items-baseline justify-between gap-2">
+                            <div className="flex items-baseline gap-2">
+                              <span className="text-xl font-black text-emerald-600 dark:text-emerald-400">
+                                {precoAtual}
+                              </span>
+                              <span className="text-[11px] font-semibold text-zinc-500">
+                                no Mercado Livre
+                              </span>
+                            </div>
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-yellow-400 text-zinc-950 text-[10px] font-black">
+                              <Zap className="w-3 h-3 fill-zinc-950" />
+                              FULL
                             </span>
                           </div>
-                        ) : null}
+                        ) : (
+                          <div className="flex items-center justify-between text-xs font-semibold text-zinc-600 dark:text-zinc-400">
+                            <span>Pronta Entrega Oficial</span>
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-yellow-400 text-zinc-950 text-[10px] font-black">
+                              <Zap className="w-3 h-3 fill-zinc-950" />
+                              FULL
+                            </span>
+                          </div>
+                        )}
                       </div>
 
-                      {/* Botões: Comprar no Mercado Livre (Full) + Ver Detalhes */}
+                      {/* Botões: Ver Oferta no Mercado Livre (Full) + Ver Detalhes */}
                       <div className="space-y-2">
                         <a
                           href={buyUrl}
                           target="_blank"
-                          rel="noopener noreferrer"
-                          className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-yellow-400 hover:bg-yellow-500 active:bg-yellow-600 text-zinc-950 font-bold text-sm shadow-md hover:shadow-lg transition-all transform active:scale-[0.99] cursor-pointer"
-                          title={`Comprar "${produto.titulo}" no Mercado Livre com envio Full`}
+                          rel="nofollow sponsored"
+                          className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-yellow-400 hover:bg-yellow-500 active:bg-yellow-600 text-zinc-950 font-black text-sm shadow-md hover:shadow-lg transition-all transform active:scale-[0.99] cursor-pointer"
+                          title={`Ver Oferta de "${produto.titulo}" no Mercado Livre`}
                         >
                           <Zap className="w-4 h-4 fill-zinc-950 text-zinc-950" />
-                          <span>Comprar no Mercado Livre (Full)</span>
+                          <span>Ver Oferta no Mercado Livre (Full)</span>
                           <ExternalLink className="w-3.5 h-3.5 ml-1 opacity-80" />
                         </a>
 
-                        <Link
-                          href={`/peca/${produto.slug}`}
-                          className="w-full flex items-center justify-center gap-1.5 py-2 text-xs font-semibold text-zinc-600 dark:text-zinc-400 hover:text-amber-500 dark:hover:text-amber-400 transition"
-                        >
-                          <span>Ver detalhes e ficha técnica completa</span>
-                          <span>&rarr;</span>
-                        </Link>
+                        <div className="flex items-center justify-between text-[11px] text-zinc-500 px-1">
+                          <span className="flex items-center gap-1">
+                            <ShieldCheck className="w-3 h-3 text-emerald-500" />
+                            Garantia Oficial
+                          </span>
+                          <Link
+                            href={`/peca/${produto.slug}`}
+                            className="font-semibold text-zinc-600 dark:text-zinc-400 hover:text-amber-500 dark:hover:text-amber-400 transition"
+                          >
+                            Ver Ficha Técnica &rarr;
+                          </Link>
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -497,6 +562,73 @@ export default function Home() {
               );
             })}
           </div>
+        )}
+
+        {/* =========================================================================
+            BARRA DE PAGINAÇÃO NAVEGÁVEL COM ALTO DESEMPENHO
+        ========================================================================== */}
+        {!isLoading && totalPages > 1 && (
+          <nav
+            aria-label="Paginação do Catálogo"
+            className="pt-8 pb-4 flex flex-col sm:flex-row items-center justify-between gap-4 border-t border-zinc-200 dark:border-zinc-800"
+          >
+            <div className="text-xs text-zinc-500 dark:text-zinc-400">
+              Página <strong className="text-zinc-900 dark:text-zinc-100">{currentPage}</strong> de{" "}
+              <strong className="text-zinc-900 dark:text-zinc-100">{totalPages}</strong> ({totalCount} peças no total)
+            </div>
+
+            <div className="flex items-center gap-1.5">
+              {/* Botão Anterior */}
+              <button
+                type="button"
+                onClick={() => handlePageChange(currentPage - 1)}
+                disabled={currentPage <= 1}
+                className="flex items-center gap-1 px-3 py-2 text-xs font-semibold rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 disabled:opacity-40 disabled:cursor-not-allowed transition"
+              >
+                <ChevronLeft className="w-4 h-4" />
+                <span>Anterior</span>
+              </button>
+
+              {/* Botões Numéricos */}
+              <div className="flex items-center gap-1">
+                {renderPaginationButtons().map((p, index) => {
+                  if (typeof p === "string") {
+                    return (
+                      <span key={`dots-${index}`} className="px-2 text-xs text-zinc-400">
+                        ...
+                      </span>
+                    );
+                  }
+                  const isCurrent = p === currentPage;
+                  return (
+                    <button
+                      key={`page-${p}`}
+                      type="button"
+                      onClick={() => handlePageChange(p)}
+                      className={`min-w-9 h-9 flex items-center justify-center text-xs font-bold rounded-xl transition ${
+                        isCurrent
+                          ? "bg-zinc-900 text-white dark:bg-white dark:text-zinc-900 shadow-sm"
+                          : "border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                      }`}
+                    >
+                      {p}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Botão Próxima */}
+              <button
+                type="button"
+                onClick={() => handlePageChange(currentPage + 1)}
+                disabled={currentPage >= totalPages}
+                className="flex items-center gap-1 px-3 py-2 text-xs font-semibold rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 disabled:opacity-40 disabled:cursor-not-allowed transition"
+              >
+                <span>Próxima</span>
+                <ChevronRight className="w-4 h-4" />
+              </button>
+            </div>
+          </nav>
         )}
       </main>
 

@@ -27,12 +27,18 @@ export interface MLSearchResultItem {
 export interface DadosTecnicosProduto {
   codigo_fabricante?: string;
   marca?: string;
-  diametro?: string;
-  estrias?: string;
-  conteudo?: string;
+  modelo?: string;
+  mpn?: string;
+  numero_peca?: string;
   codigo_oem?: string;
   posicao?: string;
   lado?: string;
+  diametro?: string;
+  estrias?: string;
+  conteudo?: string;
+  medidas?: string;
+  material?: string;
+  composicao?: string;
   tipo_veiculo?: string;
   garantia?: string;
   [key: string]: string | undefined;
@@ -44,6 +50,14 @@ export interface EspecificacoesML {
   link_afiliado: string;
   link_destino: string;
   marca: string;
+  modelo?: string;
+  mpn?: string;
+  numero_peca?: string;
+  codigo_oem?: string;
+  posicao?: string;
+  lado?: string;
+  medidas?: string;
+  composicao?: string;
   preco: string;
   preco_antigo?: string | null;
   desconto_percentual?: string | null;
@@ -51,6 +65,7 @@ export interface EspecificacoesML {
   compatibility?: string;
   dados_tecnicos?: DadosTecnicosProduto;
   descricao_completa?: string;
+  palavras_chave?: string[];
   atributos_ml?: Record<string, string | undefined>;
   ultima_sincronizacao?: string;
   [key: string]: unknown;
@@ -65,11 +80,17 @@ export interface ProdutoMLExtraido {
   pictures: string[];
   permalink: string;
   linkAfiliado: string;
+  descricao?: string;
+  aplicacao?: string[];
+  palavras_chave?: string[];
   attributes: {
     marca?: string;
     modelo?: string;
     numero_peca?: string;
+    mpn?: string;
     oem?: string;
+    lado?: string;
+    posicao?: string;
     [key: string]: string | undefined;
   };
   // Objeto estruturado pronto para exibição e salvamento na tabela produtos_afiliados do Supabase
@@ -88,6 +109,9 @@ export interface ProdutoMLExtraido {
     desconto_percentual: string | null;
     imagem_url: string;
     link_afiliado: string;
+    descricao?: string;
+    aplicacao?: string[];
+    palavras_chave?: string[];
     especificacoes: EspecificacoesML;
   };
 }
@@ -136,6 +160,211 @@ export function gerarSlug(text: string): string {
     .replace(/-+/g, "-")
     .slice(0, 90)
     .replace(/^-+|-+$/g, "");
+}
+
+/**
+ * Extrai o ID do item MLB de uma URL ou string de texto (ex: "MLB3931144723" ou "MLB-3931144723")
+ */
+export function extrairItemIdML(textoOuUrl: string): string | null {
+  if (!textoOuUrl || typeof textoOuUrl !== "string") return null;
+  const clean = textoOuUrl.trim();
+
+  // 1. Padrão direto na URL: MLB-123456789 ou MLB123456789
+  const directMatch = clean.match(/(?:item_id=|wid=|\/p\/|\/up\/MLBU?|MLB-?|^)(MLB-?\d{8,14})/i);
+  if (directMatch && directMatch[1]) {
+    return directMatch[1].replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+  }
+
+  // 2. Formato MLBU (User listing) com número
+  const mlbuMatch = clean.match(/MLBU-?(\d{8,14})/i);
+  if (mlbuMatch && mlbuMatch[1]) {
+    return `MLB${mlbuMatch[1]}`;
+  }
+
+  // 3. Padrão geral de ID MLB seguido de números
+  const generalMatch = clean.match(/\b(MLB-?\d{8,14})\b/i);
+  if (generalMatch && generalMatch[1]) {
+    return generalMatch[1].replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+  }
+
+  return null;
+}
+
+export const MONTADORAS_CONHECIDAS = [
+  "Chevrolet", "GM", "Volkswagen", "VW", "Fiat", "Ford", "Toyota", "Honda",
+  "Hyundai", "Renault", "Nissan", "Jeep", "Peugeot", "Citroen", "Citroën",
+  "Mitsubishi", "Kia", "Chery", "Caoa Chery", "BMW", "Audi", "Mercedes-Benz",
+  "Mercedes", "Volvo", "BYD", "GWM", "Suzuki", "Subaru", "Troller"
+];
+
+export const MODELOS_CONHECIDOS = [
+  "Onix", "Prisma", "Celta", "Corsa", "Cobalt", "Spin", "Cruze", "Tracker", "S10",
+  "Montana", "Astra", "Vectra", "Zafira", "Meriva", "Kadett", "Monza", "Opala",
+  "Gol", "Fox", "Voyage", "Saveiro", "Polo", "Golf", "Up", "Up!", "Virtus",
+  "T-Cross", "Nivus", "Taos", "Tiguan", "Amarok", "Santana", "Parati", "Kombi",
+  "Palio", "Uno", "Siena", "Strada", "Toro", "Mobi", "Argo", "Cronos", "Pulse",
+  "Fastback", "Fiorino", "Doblo", "Doblò", "Idea", "Punto", "Bravo", "Linea",
+  "Palio Weekend", "Weekend", "Adventure",
+  "HB20", "HB20S", "HB20X", "Creta", "Tucson", "ix35", "Santa Fe", "i30",
+  "Ka", "Fiesta", "EcoSport", "Ranger", "Focus", "Fusion", "Courier",
+  "Civic", "Fit", "City", "HR-V", "CR-V", "WR-V", "Accord",
+  "Corolla", "Etios", "Yaris", "Hilux", "SW4", "Corolla Cross",
+  "Sandero", "Logan", "Duster", "Kwid", "Oroch", "Captur", "Clio",
+  "Kicks", "March", "Versa", "Sentra", "Frontier", "Tiida",
+  "Compass", "Renegade", "Commander",
+  "206", "207", "208", "2008", "307", "308", "3008",
+  "C3", "C4", "C4 Cactus", "Aircross"
+];
+
+/**
+ * Gera automaticamente uma lista/array de 'palavras_chave' (keywords) para SEO
+ * combinando: nome da peça, montadoras citadas, modelos, anos e os códigos de peça encontrados.
+ */
+export function gerarPalavrasChave({
+  titulo,
+  descricao,
+  marca,
+  modelo,
+  codigo_fabricante,
+  codigo_oem,
+  aplicacao,
+  categoria,
+  atributos,
+}: {
+  titulo: string;
+  descricao?: string | null;
+  marca?: string | null;
+  modelo?: string | null;
+  codigo_fabricante?: string | null;
+  codigo_oem?: string | null;
+  aplicacao?: string[] | string | null;
+  categoria?: string | null;
+  atributos?: Record<string, string | undefined> | null;
+}): string[] {
+  const keywordsSet = new Set<string>();
+  const aplicacaoTexto = Array.isArray(aplicacao) ? aplicacao.join(" ") : aplicacao || "";
+  const textoCompleto = `${titulo || ""} ${descricao || ""} ${aplicacaoTexto} ${categoria || ""}`;
+
+  // 1. Título Limpo
+  const tituloLimpo = (titulo || "")
+    .replace(/\s*-\s*R\$.*$/i, "")
+    .replace(/\s*\|\s*.*$/i, "")
+    .trim();
+  if (tituloLimpo) keywordsSet.add(tituloLimpo.toLowerCase());
+
+  // 2. Montadoras citadas
+  const montadorasEncontradas: string[] = [];
+  for (const m of MONTADORAS_CONHECIDAS) {
+    const reg = new RegExp(`\\b${m}\\b`, "i");
+    if (reg.test(textoCompleto)) {
+      montadorasEncontradas.push(m);
+      keywordsSet.add(m.toLowerCase());
+    }
+  }
+
+  // 3. Modelos de veículos citados
+  const modelosEncontrados: string[] = [];
+  for (const mod of MODELOS_CONHECIDOS) {
+    const reg = new RegExp(`\\b${mod}\\b`, "i");
+    if (reg.test(textoCompleto)) {
+      modelosEncontrados.push(mod);
+      keywordsSet.add(mod.toLowerCase());
+    }
+  }
+
+  // 4. Anos citados (individuais e faixas)
+  const anosMatches = textoCompleto.match(/\b(19\d{2}|20\d{2})\b/g) || [];
+  const anosUnicos = [...new Set(anosMatches)].slice(0, 8);
+  for (const ano of anosUnicos) {
+    keywordsSet.add(ano);
+  }
+
+  const faixasAnos = textoCompleto.match(/\b(19\d{2}|20\d{2})\s*(?:a|à|-|\/)\s*(19\d{2}|20\d{2})\b/gi) || [];
+  for (const faixa of faixasAnos) {
+    keywordsSet.add(faixa.toLowerCase());
+  }
+
+  // 5. Marca e Modelo técnico
+  if (marca && marca !== "Auto Peças") {
+    keywordsSet.add(marca.toLowerCase());
+  }
+  if (modelo) {
+    keywordsSet.add(modelo.toLowerCase());
+  }
+
+  // 6. Códigos de Peça (Fabricante, MPN, OEM, Número de Peça)
+  const codigosRaw = [
+    codigo_fabricante,
+    codigo_oem,
+    atributos?.["PART_NUMBER"],
+    atributos?.["MPN"],
+    atributos?.["OEM"],
+    atributos?.["NUMERO_DE_PECA"],
+    atributos?.["NÚMERO DE PEÇA"],
+    atributos?.["Número de peça"],
+  ].filter(Boolean);
+
+  const codigosEncontrados: string[] = [];
+  for (const c of codigosRaw) {
+    const parts = String(c).split(/[\s,;/|]+/);
+    for (const p of parts) {
+      const cleanP = p.trim().replace(/[^A-Za-z0-9-]/g, "");
+      if (cleanP.length >= 3) {
+        codigosEncontrados.push(cleanP);
+        keywordsSet.add(cleanP.toLowerCase());
+        keywordsSet.add(cleanP.replace(/-/g, "").toLowerCase());
+      }
+    }
+  }
+
+  // 7. Tipo de Peça / Categoria
+  const tiposPeca = [
+    "pastilha de freio", "disco de freio", "kit de embreagem", "kit embreagem",
+    "amortecedor", "vela de ignição", "vela ignicao", "bomba de combustivel",
+    "correia dentada", "filtro de oleo", "filtro de ar", "filtro de combustivel",
+    "pivo de suspensao", "bandeja de suspensao", "bieleta", "bateria"
+  ];
+  const tiposDetectados: string[] = [];
+  for (const tp of tiposPeca) {
+    if (new RegExp(tp.replace(/\s+/g, "\\s+"), "i").test(textoCompleto)) {
+      tiposDetectados.push(tp);
+      keywordsSet.add(tp);
+    }
+  }
+  if (tiposDetectados.length === 0 && categoria) {
+    keywordsSet.add(categoria.toLowerCase());
+    tiposDetectados.push(categoria.toLowerCase());
+  }
+
+  // 8. Combinações inteligentes de alto valor de conversão para SEO
+  const tipoPrincipal = tiposDetectados[0] || "peça automotiva";
+
+  // Combinações: [tipo] + [modelo]
+  for (const mod of modelosEncontrados.slice(0, 6)) {
+    keywordsSet.add(`${tipoPrincipal} ${mod.toLowerCase()}`);
+    if (marca && marca !== "Auto Peças") {
+      keywordsSet.add(`${tipoPrincipal} ${marca.toLowerCase()} ${mod.toLowerCase()}`);
+    }
+    keywordsSet.add(`peças ${mod.toLowerCase()}`);
+  }
+
+  // Combinações: [marca] + [código]
+  if (marca && marca !== "Auto Peças") {
+    for (const cod of codigosEncontrados.slice(0, 3)) {
+      keywordsSet.add(`${marca.toLowerCase()} ${cod.toLowerCase()}`);
+      keywordsSet.add(`${tipoPrincipal} ${cod.toLowerCase()}`);
+    }
+  }
+
+  // Combinações: [código] + [modelo]
+  if (codigosEncontrados.length > 0 && modelosEncontrados.length > 0) {
+    keywordsSet.add(`${codigosEncontrados[0].toLowerCase()} ${modelosEncontrados[0].toLowerCase()}`);
+  }
+
+  return Array.from(keywordsSet)
+    .map((k) => k.trim())
+    .filter((k) => k.length >= 2 && k.length <= 80)
+    .slice(0, 40);
 }
 
 /**
@@ -565,29 +794,64 @@ export function extrairDadosDescricaoML(
   const marcaDeduzida = titulo ? deduzirMarca(titulo) : null;
   dadosTecnicos.marca = marcaAttr || marcaDesc || marcaDeduzida || "Auto Peças";
 
-  // Código Fabricante / Número da Peça
-  const codAttr =
+  // Modelo
+  const modeloAttr = attrs["MODEL"] || attrs["MODELO"];
+  const modeloDesc = desc.match(/(?:Modelo)\s*[:=-]\s*([^\n\r]+)/i)?.[1]?.trim();
+  dadosTecnicos.modelo = modeloAttr || modeloDesc || undefined;
+
+  // MPN (código do fabricante)
+  const mpnAttr =
+    attrs["MPN"] ||
+    attrs["MANUFACTURER_PART_NUMBER"] ||
     attrs["PART_NUMBER"] ||
-    attrs["NUMERO_DE_PECA"] ||
-    attrs["NÚMERO DE PEÇA"] ||
     attrs["CODIGO_DE_FABRICANTE"] ||
     attrs["CODIGO_FABRICANTE"];
+  const mpnDesc = desc
+    .match(/(?:MPN|Part\s*Number|C[óo]digo(?:\s+do)?\s+fabricante)\s*[:=-]\s*([A-Za-z0-9\.\-\/]+)/i)?.[1]
+    ?.trim();
+  dadosTecnicos.mpn = mpnAttr || mpnDesc || undefined;
 
-  const codDescMatch = desc.match(
-    /(?:C[óo]digo(?:\s+da\s+pe[çc]a|\s+do\s+fabricante)?|Part\s*Number|Ref(?:\.|er[eê]ncia)?)\s*[:=-]\s*([A-Za-z0-9\.\-\/]+(?:\s+[A-Za-z0-9\.\-\/]+)*)/i
-  );
-  const codDesc = codDescMatch?.[1]?.trim();
+  // Número da Peça / Part Number
+  const numPecaAttr =
+    attrs["NUMERO_DE_PECA"] ||
+    attrs["NÚMERO DE PEÇA"] ||
+    attrs["PART_NUMBER"] ||
+    attrs["PIECE_NUMBER"] ||
+    attrs["CODIGO_DA_PECA"];
+  const numPecaDesc = desc
+    .match(/(?:N[úu]mero\s+de\s+pe[çc]a|C[óo]digo(?:\s+da\s+pe[çc]a)?|Ref(?:\.|er[eê]ncia)?)\s*[:=-]\s*([A-Za-z0-9\.\-\/]+(?:\s+[A-Za-z0-9\.\-\/]+)*)/i)?.[1]
+    ?.trim();
+  dadosTecnicos.numero_peca = numPecaAttr || numPecaDesc || undefined;
 
   // Padrões de código automotivo fortes (ex: LuK 619 3015 00 ou 619312000, Bosch F000..., etc.)
   const codePatt = desc.match(
     /\b(6\d{2}\s?\d{4}\s?\d{2}|6\d{8}|[A-Z]{2,4}[/-]\d{3,6}|F000[A-Z0-9]{5,7}|CT\d{4,5})\b/i
   );
 
-  let codigoFinal = codDesc || codePatt?.[1]?.trim() || codAttr;
+  let codigoFinal = dadosTecnicos.mpn || dadosTecnicos.numero_peca || codePatt?.[1]?.trim();
   if (!codigoFinal && titulo) {
     codigoFinal = deduzirCodigo(titulo, dadosTecnicos.marca || "Auto Peças");
   }
   dadosTecnicos.codigo_fabricante = codigoFinal || undefined;
+
+  // Código OEM
+  const oemAttr = attrs["OEM"] || attrs["OEM_PART_NUMBER"] || attrs["CÓDIGO OEM"] || attrs["CODIGO_OEM"];
+  const oemDesc = desc
+    .match(/(?:C[óo]digo\s+OEM|OEM|Convers[ãa]o|Original)\s*[:=-]\s*([A-Za-z0-9\s\.\-\/,;]+)/i)?.[1]
+    ?.trim();
+  if (oemDesc || (oemAttr && !/nao\s+se\s+aplica/i.test(oemAttr))) {
+    dadosTecnicos.codigo_oem = oemDesc || oemAttr;
+  }
+
+  // Posição
+  const posAttr = attrs["POSITION"] || attrs["POSIÇÃO"] || attrs["POSICAO"];
+  const posDesc = desc.match(/\b(Dianteir[oa]|Traseir[oa]|Superior|Inferior)\b/i)?.[1];
+  dadosTecnicos.posicao = posAttr || posDesc || undefined;
+
+  // Lado
+  const ladoAttr = attrs["SIDE"] || attrs["LADO"];
+  const ladoDesc = desc.match(/\b(Direit[oa]|Esquerd[oa]|Ambos(?:\s+os\s+lados)?)\b/i)?.[1];
+  dadosTecnicos.lado = ladoAttr || ladoDesc || undefined;
 
   // Diâmetro
   const diamAttr =
@@ -611,6 +875,12 @@ export function extrairDadosDescricaoML(
     desc.match(/\b(\d{1,2})\s*estrias\b/i)?.[1]?.trim();
   dadosTecnicos.estrias = estriasDesc || (estriasAttr ? `${estriasAttr}` : undefined);
 
+  // Material / Composição
+  const matAttr = attrs["MATERIAL"] || attrs["COMPOSIÇÃO"] || attrs["COMPOSICAO"];
+  const matDesc = desc.match(/(?:Material|Composi[çc][ãa]o)\s*[:=-]\s*([^\n\r]+)/i)?.[1]?.trim();
+  dadosTecnicos.material = matAttr || matDesc || undefined;
+  dadosTecnicos.composicao = dadosTecnicos.material;
+
   // Conteúdo da Embalagem
   const conteudoDesc = desc
     .match(/(?:Conte[úu]do(?:\s+da\s+embalagem)?|Itens\s+inclusos|Composi[çc][ãa]o)\s*[:=-]\s*([^\n\r]+)/i)?.[1]
@@ -633,19 +903,10 @@ export function extrairDadosDescricaoML(
   }
   dadosTecnicos.conteudo = conteudoMontado || undefined;
 
-  // Código OEM
-  const oemAttr = attrs["OEM"] || attrs["CÓDIGO OEM"] || attrs["CODIGO_OEM"];
-  const oemDesc = desc
-    .match(/(?:C[óo]digo\s+OEM|OEM|Convers[ãa]o|Original)\s*[:=-]\s*([A-Za-z0-9\s\.\-\/,;]+)/i)?.[1]
-    ?.trim();
-  if (oemDesc || (oemAttr && !/nao\s+se\s+aplica/i.test(oemAttr))) {
-    dadosTecnicos.codigo_oem = oemDesc || oemAttr;
-  }
-
-  // Posição / Lado
-  const posAttr = attrs["POSIÇÃO"] || attrs["POSICAO"] || attrs["LADO"];
-  const posDesc = desc.match(/\b(Dianteir[oa]|Traseir[oa]|Direit[oa]|Esquerd[oa]|Superior|Inferior)\b/i)?.[1];
-  dadosTecnicos.posicao = posAttr || posDesc || undefined;
+  // Garantia
+  const garAttr = attrs["GARANTIA"] || attrs["WARRANTY"];
+  const garDesc = desc.match(/(?:Garantia)\s*[:=-]\s*([^\n\r]+)/i)?.[1]?.trim();
+  dadosTecnicos.garantia = garAttr || garDesc || undefined;
 
   return {
     aplicacao,
@@ -1085,6 +1346,19 @@ export function processarItemML(
 
   const slug = gerarSlug(item.title) || `peca-${item.id.toLowerCase()}`;
 
+  // Geração automática de palavras-chave de alto desempenho para SEO
+  const palavrasChave = gerarPalavrasChave({
+    titulo: item.title,
+    descricao: descricaoTexto,
+    marca,
+    modelo,
+    codigo_fabricante: numeroPeca,
+    codigo_oem: oem,
+    aplicacao,
+    categoria,
+    atributos: attrs,
+  });
+
   return {
     id: item.id,
     title: item.title,
@@ -1094,11 +1368,17 @@ export function processarItemML(
     pictures: pictures,
     permalink: permalink,
     linkAfiliado: linkAfiliado,
+    descricao: descricaoTexto || undefined,
+    aplicacao: aplicacao,
+    palavras_chave: palavrasChave,
     attributes: {
       marca,
       modelo,
       numero_peca: numeroPeca,
+      mpn: dados_tecnicos.mpn || numeroPeca,
       oem: oem || undefined,
+      lado: dados_tecnicos.lado,
+      posicao: dados_tecnicos.posicao,
       ...attrs,
     },
     produtoProntoParaSalvar: {
@@ -1116,21 +1396,34 @@ export function processarItemML(
       desconto_percentual: descontoPercentual,
       imagem_url: thumbnail,
       link_afiliado: linkAfiliado,
+      descricao: descricaoTexto || undefined,
+      aplicacao: aplicacao,
+      palavras_chave: palavrasChave,
       especificacoes: {
         ml_id: item.id,
         link_ml: permalink,
         link_afiliado: linkAfiliado,
         link_destino: linkAfiliado,
         marca: marca,
+        modelo: modelo,
+        mpn: dados_tecnicos.mpn || numeroPeca,
+        numero_peca: numeroPeca,
+        codigo_oem: oem || undefined,
+        posicao: dados_tecnicos.posicao,
+        lado: dados_tecnicos.lado,
+        medidas: dados_tecnicos.medidas || dados_tecnicos.diametro,
+        composicao: dados_tecnicos.composicao || dados_tecnicos.material,
         preco: precoFormatado,
         preco_antigo: precoOriginalFormatado,
         desconto_percentual: descontoPercentual,
         aplicacao: aplicacao,
         compatibility: compatibility,
+        palavras_chave: palavrasChave,
         dados_tecnicos: {
           ...dados_tecnicos,
           codigo_fabricante: numeroPeca,
           marca: marca,
+          modelo: modelo,
           codigo_oem: oem || undefined,
         },
         descricao_completa: descricaoTexto || undefined,

@@ -44,6 +44,9 @@ export interface AdminProduct {
   imagem_url?: string | null;
   link_afiliado?: string | null;
   ultima_sincronizacao?: string | null;
+  descricao?: string | null;
+  aplicacao?: string[] | string | null;
+  palavras_chave?: string[] | string | null;
   especificacoes?: {
     preco_antigo?: string;
     desconto_percentual?: string;
@@ -51,6 +54,9 @@ export interface AdminProduct {
     link_ml?: string;
     link_destino?: string;
     ultima_sincronizacao?: string;
+    descricao_completa?: string;
+    aplicacao?: string[];
+    palavras_chave?: string[];
     [key: string]: unknown;
   } | null;
   created_at?: string;
@@ -285,10 +291,14 @@ export default function AdminPanel() {
 
       setImportUrl("");
 
+      const qtdKeywords =
+        (Array.isArray(data.dadosExtraidos?.palavras_chave) ? data.dadosExtraidos.palavras_chave.length : 0) ||
+        (Array.isArray(novoProduto.palavras_chave) ? novoProduto.palavras_chave.length : 0);
+
       setToast({
         type: "success",
         title: "Produto Importado com Sucesso!",
-        message: `"${novoProduto.titulo}" cadastrado com preço ${novoProduto.preco_estimado || ""}!`,
+        message: `"${novoProduto.titulo}" cadastrado com sucesso! Descrição capturada e ${qtdKeywords} palavras-chave geradas para SEO.`,
       });
     } catch (err: unknown) {
       console.error("Erro na importação:", err);
