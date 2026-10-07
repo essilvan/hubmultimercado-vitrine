@@ -530,11 +530,12 @@ export async function obterTokenMercadoLivre(): Promise<string | null> {
         "Content-Type": "application/x-www-form-urlencoded",
         Accept: "application/json",
       },
+      body: params.toString(),
     });
 
     if (!res.ok) {
       const errText = await res.text().catch(() => "");
-      console.warn("Aviso ao obter Access Token OAuth do Mercado Livre:", res.status, errText);
+      console.error("Erro ao obter Access Token OAuth do Mercado Livre:", res.status, errText);
       return null;
     }
 
@@ -550,7 +551,7 @@ export async function obterTokenMercadoLivre(): Promise<string | null> {
       return token;
     }
   } catch (err) {
-    console.warn("Falha ao comunicar com endpoint OAuth do Mercado Livre:", err);
+    console.error("Falha ao comunicar com endpoint OAuth do Mercado Livre:", err);
   }
 
   return null;
@@ -562,8 +563,6 @@ export async function obterTokenMercadoLivre(): Promise<string | null> {
  */
 export async function obterHeadersApiML(): Promise<Record<string, string>> {
   const headers: Record<string, string> = {
-    "User-Agent":
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     Accept: "application/json",
     "Accept-Language": "pt-BR,pt;q=0.9",
   };
@@ -591,19 +590,20 @@ export async function consultarDetalhesItemML(itemId: string): Promise<MLSearchR
       next: { revalidate: 60 },
     });
 
-    if (res.status === 429 || res.status === 403) {
-      console.error("Bloqueio/Rate Limit ML (items):", res.statusText || `${res.status}`);
-      return null;
-    }
-
     if (!res.ok) {
+      const errText = await res.text().catch(() => "");
+      if (res.status === 429 || res.status === 403) {
+        console.warn(`[consultarDetalhesItemML] Acesso restrito ou rate limit no item ${cleanId} (HTTP ${res.status}):`, errText);
+      } else {
+        console.warn(`[consultarDetalhesItemML] Resposta não-OK para item ${cleanId} (HTTP ${res.status}):`, errText);
+      }
       return null;
     }
 
     const item = await res.json();
     return item as MLSearchResultItem;
   } catch (err) {
-    console.warn(`Aviso ao consultar detalhes do item ${cleanId} na API do ML:`, err);
+    console.error(`[consultarDetalhesItemML] Erro ao consultar detalhes do item ${cleanId} na API do ML:`, err);
     return null;
   }
 }
@@ -623,13 +623,21 @@ export async function obterDescricaoItemML(itemId: string): Promise<string | nul
     });
 
     if (!res.ok) {
+      const errText = await res.text().catch(() => "");
+      console.error(`[obterDescricaoItemML] Erro na requisição da descrição de ${cleanId} (HTTP ${res.status}):`, errText);
       return null;
     }
 
     const data = await res.json();
-    return typeof data.plain_text === "string" ? data.plain_text.trim() : null;
+    if (typeof data.plain_text === "string" && data.plain_text.trim()) {
+      return data.plain_text.trim();
+    }
+    if (typeof data.text === "string" && data.text.trim()) {
+      return data.text.trim();
+    }
+    return null;
   } catch (err) {
-    console.warn(`Aviso ao consultar descrição do item ${cleanId}:`, err);
+    console.error(`[obterDescricaoItemML] Falha na comunicação com a API de descrição de ${cleanId}:`, err);
     return null;
   }
 }
@@ -682,6 +690,43 @@ export function extrairTabelaEspecificacoesHtml(html: string): Record<string, st
       ?.trim();
     if (th && td) {
       tableAttrs[th] = td;
+      const upperTh = th.toUpperCase();
+      tableAttrs[upperTh] = td;
+
+      if (upperTh === "MARCA" || upperTh === "FABRICANTE") {
+        tableAttrs["BRAND"] = td;
+        tableAttrs["MARCA"] = td;
+      }
+      if (
+        upperTh === "NÚMERO DE PEÇA" ||
+        upperTh === "NUMERO DE PECA" ||
+        upperTh === "NÚMERO DA PEÇA" ||
+        upperTh === "NUMERO DA PECA" ||
+        upperTh === "CÓDIGO DA PEÇA" ||
+        upperTh === "CODIGO DA PECA" ||
+        upperTh === "CÓDIGO DO FABRICANTE" ||
+        upperTh === "CODIGO DO FABRICANTE"
+      ) {
+        tableAttrs["PART_NUMBER"] = td;
+        tableAttrs["NUMERO_DE_PECA"] = td;
+        tableAttrs["MPN"] = td;
+      }
+      if (upperTh === "CÓDIGO OEM" || upperTh === "CODIGO OEM" || upperTh === "OEM") {
+        tableAttrs["OEM"] = td;
+        tableAttrs["CODIGO_OEM"] = td;
+      }
+      if (upperTh === "MODELO" || upperTh === "MODEL") {
+        tableAttrs["MODEL"] = td;
+        tableAttrs["MODELO"] = td;
+      }
+      if (upperTh === "LADO" || upperTh === "SIDE") {
+        tableAttrs["SIDE"] = td;
+        tableAttrs["LADO"] = td;
+      }
+      if (upperTh === "POSIÇÃO" || upperTh === "POSICAO" || upperTh === "POSITION") {
+        tableAttrs["POSITION"] = td;
+        tableAttrs["POSICAO"] = td;
+      }
     }
   }
 
@@ -712,47 +757,79 @@ export function extrairDadosDescricaoML(
 
   // 1. Extração de Aplicação / Veículos Compatíveis
   const aplicacao: string[] = [];
-  const lines = desc.split("\n").map((l) => l.trim());
 
-  let emBlocoAplicacao = false;
-  for (const line of lines) {
-    if (!line) continue;
+  // 1.1 Extração estruturada de blocos "Montadora: ... Veículo: ... Motor: ... Ano: ..."
+  const blocosMontadora = [
+    ...desc.matchAll(
+      /Montadora:\s*([^;\n]+)[;\n]\s*Ve[íi]culo:\s*([^;\n]+)[;\n](?:\s*Motor:\s*([^;\n]+)[;\n])?(?:\s*Ano(?:\s*Fabrica[çc][ãa]o)?:\s*([^\n]+))?/gi
+    ),
+  ];
+  if (blocosMontadora.length > 0) {
+    for (const b of blocosMontadora) {
+      const montadora = b[1]?.trim() || "";
+      const veiculo = b[2]?.trim() || "";
+      const motor = b[3]?.trim() || "";
+      const anosRaw = b[4]?.trim() || "";
 
-    // Identifica início da seção de aplicação
-    if (
-      /^(?:APLICA[ÇC][ÃA]O|APLICA[ÇC][ÕO]ES|VE[ÍI]CULOS COMPAT[ÍI]VEIS|COMPATIBILIDADE|APLICA-SE|APLIC[ÁA]VEL EM|TABELA DE APLICA[ÇC][ÃA]O|COMPAT[ÍI]VEL COM)[:\s-]*$/i.test(
-        line
-      )
-    ) {
-      emBlocoAplicacao = true;
-      continue;
-    }
+      let anoFormatado = "";
+      if (anosRaw) {
+        const anos = [...anosRaw.matchAll(/\b(19\d{2}|20\d{2})\b/g)].map((m) => m[1]);
+        if (anos.length === 1) {
+          anoFormatado = `(${anos[0]})`;
+        } else if (anos.length > 1) {
+          anoFormatado = `(${anos[0]} a ${anos[anos.length - 1]})`;
+        }
+      }
 
-    // Identifica fim da seção de aplicação quando encontrar outro cabeçalho
-    if (
-      emBlocoAplicacao &&
-      /^(?:DADOS T[ÉE]CNICOS|ESPECIFICA[ÇC][ÕO]ES|CONTE[ÚU]DO|INFORMA[ÇC][ÕO]ES|GARANTIA|OBS|ATEN[ÇC][ÃA]O|C[ÓO]DIGO|D[ÚU]VIDAS|IMPORTANTE|FABRICANTE)[:\s-]/i.test(
-        line
-      )
-    ) {
-      emBlocoAplicacao = false;
-      continue;
-    }
-
-    if (emBlocoAplicacao) {
-      const cleanLine = line.replace(/^[-*•·>✓]\s*/, "").trim();
-      if (
-        cleanLine.length >= 3 &&
-        !/^(?:consulte|antes de|foto|imagem|duvidas|garantia|frete|atencao|importante|obs)/i.test(
-          cleanLine
-        )
-      ) {
-        aplicacao.push(cleanLine);
+      const item = [montadora, veiculo, motor, anoFormatado].filter(Boolean).join(" ");
+      if (item && !aplicacao.includes(item)) {
+        aplicacao.push(item);
       }
     }
   }
 
-  // Fallback: Se não encontrou cabeçalho explícito "APLICAÇÃO", busca linhas com veículos conhecidos
+  const lines = desc.split("\n").map((l) => l.trim());
+
+  // 1.2 Extração por seção "Aplicação"
+  if (aplicacao.length === 0) {
+    let emBlocoAplicacao = false;
+    for (const line of lines) {
+      if (!line) continue;
+
+      if (
+        /^(?:#+\s*)?(?:APLICA[ÇC][ÃA]O|APLICA[ÇC][ÕO]ES|VE[ÍI]CULOS COMPAT[ÍI]VEIS|COMPATIBILIDADE|APLICA-SE|APLIC[ÁA]VEL|TABELA DE APLICA[ÇC][ÃA]O|MODELOS COMPAT[ÍI]VEIS|ONDE SE APLICA)(?:\s+DOS?\s+VE[ÍI]CULOS)?[:\s-]*$/i.test(
+          line
+        )
+      ) {
+        emBlocoAplicacao = true;
+        continue;
+      }
+
+      if (
+        emBlocoAplicacao &&
+        /^(?:#+\s*)?(?:DADOS T[ÉE]CNICOS|ESPECIFICA[ÇC][ÕO]ES|CONTE[ÚU]DO|INFORMA[ÇC][ÕO]ES|GARANTIA|OBS|ATEN[ÇC][ÃA]O|C[ÓO]DIGO|D[ÚU]VIDAS|IMPORTANTE|FABRICANTE|EVITE DEVOLU[ÇC][ÕO]ES)[:\s-]/i.test(
+          line
+        )
+      ) {
+        emBlocoAplicacao = false;
+        break;
+      }
+
+      if (emBlocoAplicacao) {
+        const cleanLine = line.replace(/^[-*•·>✓]\s*/, "").trim();
+        if (
+          cleanLine.length >= 3 &&
+          !/^(?:consulte|antes de|foto|imagem|duvidas|garantia|frete|atencao|importante|obs|evite devolu)/i.test(
+            cleanLine
+          )
+        ) {
+          aplicacao.push(cleanLine);
+        }
+      }
+    }
+  }
+
+  // 1.3 Fallback: Se não encontrou cabeçalho explícito "APLICAÇÃO", busca linhas com veículos conhecidos
   if (aplicacao.length === 0) {
     const regexVeiculosLinha =
       /\b(Fiat|Chevrolet|GM|Ford|Volkswagen|VW|Renault|Hyundai|Toyota|Honda|Nissan|Jeep|Peugeot|Citro[eë]n|Palio|Uno|Gol|Fox|Polo|Voyage|Saveiro|Onix|Prisma|Corsa|Celta|HB20|Ka|Fiesta|EcoSport|Civic|Fit|Corolla|Sandero|Logan|Duster|Compass|Renegade|Mobi|Siena|Strada|Toro|Cruze|Spin|Cobalt|Tracker|Kicks|Creta|Up!?|Golf)\b/i;
@@ -764,7 +841,7 @@ export function extrairDadosDescricaoML(
         cleanLine.length <= 120
       ) {
         if (
-          !/^(?:garantia|atencao|importante|obs|foto|imagem|duvidas|politica)/i.test(
+          !/^(?:garantia|atencao|importante|obs|foto|imagem|duvidas|politica|evite devolu)/i.test(
             cleanLine
           )
         ) {
@@ -774,7 +851,7 @@ export function extrairDadosDescricaoML(
     }
   }
 
-  // Se ainda estiver vazio, deduz a partir do título
+  // 1.4 Se ainda estiver vazio, deduz a partir do título
   if (aplicacao.length === 0 && titulo) {
     const deduzidos = deduzirVeiculos(titulo);
     if (deduzidos && !deduzidos.startsWith("Consulte")) {
@@ -787,12 +864,15 @@ export function extrairDadosDescricaoML(
 
   // Marca / Fabricante
   const marcaAttr =
-    attrs["MARCA"] || attrs["BRAND"] || attrs["FABRICANTE"] || attrs["MANUFACTURER"];
+    attrs["BRAND"] || attrs["MARCA"] || attrs["FABRICANTE"] || attrs["MANUFACTURER"];
   const marcaDesc = desc
     .match(/(?:Fabricante|Marca)\s*[:=-]\s*([^\n\r]+)/i)?.[1]
     ?.trim();
   const marcaDeduzida = titulo ? deduzirMarca(titulo) : null;
-  dadosTecnicos.marca = marcaAttr || marcaDesc || marcaDeduzida || "Auto Peças";
+  dadosTecnicos.marca =
+    marcaAttr ||
+    marcaDesc ||
+    (marcaDeduzida && marcaDeduzida !== "Auto Peças" ? marcaDeduzida : undefined);
 
   // Modelo
   const modeloAttr = attrs["MODEL"] || attrs["MODELO"];
@@ -801,14 +881,21 @@ export function extrairDadosDescricaoML(
 
   // MPN (código do fabricante)
   const mpnAttr =
+    attrs["PART_NUMBER"] ||
     attrs["MPN"] ||
     attrs["MANUFACTURER_PART_NUMBER"] ||
-    attrs["PART_NUMBER"] ||
     attrs["CODIGO_DE_FABRICANTE"] ||
-    attrs["CODIGO_FABRICANTE"];
+    attrs["CODIGO_FABRICANTE"] ||
+    attrs["NUMERO_DE_PECA"] ||
+    attrs["NÚMERO DE PEÇA"];
+
   const mpnDesc = desc
-    .match(/(?:MPN|Part\s*Number|C[óo]digo(?:\s+do)?\s+fabricante)\s*[:=-]\s*([A-Za-z0-9\.\-\/]+)/i)?.[1]
+    .match(
+      /(?:C[óo]digo(?:\s+do)?\s+(?:produto|fabricante|item|pe[çc]a)|MPN|Part\s*Number|Ref(?:\.|er[eê]ncia)?)\s*[:=-]\s*([^\n\r]+)/i
+    )?.[1]
+    ?.replace(/[.;,].*$/, "")
     ?.trim();
+
   dadosTecnicos.mpn = mpnAttr || mpnDesc || undefined;
 
   // Número da Peça / Part Number
@@ -818,10 +905,15 @@ export function extrairDadosDescricaoML(
     attrs["PART_NUMBER"] ||
     attrs["PIECE_NUMBER"] ||
     attrs["CODIGO_DA_PECA"];
+
   const numPecaDesc = desc
-    .match(/(?:N[úu]mero\s+de\s+pe[çc]a|C[óo]digo(?:\s+da\s+pe[çc]a)?|Ref(?:\.|er[eê]ncia)?)\s*[:=-]\s*([A-Za-z0-9\.\-\/]+(?:\s+[A-Za-z0-9\.\-\/]+)*)/i)?.[1]
+    .match(
+      /(?:N[úu]mero\s+de\s+pe[çc]a|C[óo]digo(?:\s+da\s+pe[çc]a)?)\s*[:=-]\s*([^\n\r]+)/i
+    )?.[1]
+    ?.replace(/[.;,].*$/, "")
     ?.trim();
-  dadosTecnicos.numero_peca = numPecaAttr || numPecaDesc || undefined;
+
+  dadosTecnicos.numero_peca = numPecaAttr || numPecaDesc || mpnDesc || undefined;
 
   // Padrões de código automotivo fortes (ex: LuK 619 3015 00 ou 619312000, Bosch F000..., etc.)
   const codePatt = desc.match(
@@ -830,7 +922,10 @@ export function extrairDadosDescricaoML(
 
   let codigoFinal = dadosTecnicos.mpn || dadosTecnicos.numero_peca || codePatt?.[1]?.trim();
   if (!codigoFinal && titulo) {
-    codigoFinal = deduzirCodigo(titulo, dadosTecnicos.marca || "Auto Peças");
+    const codDeduzido = deduzirCodigo(titulo, dadosTecnicos.marca || "Auto Peças");
+    if (codDeduzido && codDeduzido !== "COD-ML" && !codDeduzido.endsWith("-PEC")) {
+      codigoFinal = codDeduzido;
+    }
   }
   dadosTecnicos.codigo_fabricante = codigoFinal || undefined;
 
@@ -1276,9 +1371,13 @@ export function processarItemML(
   }
   if (Array.isArray(item.attributes)) {
     for (const attr of item.attributes) {
-      if (!attr.value_name) continue;
-      const key = attr.id ? attr.id.toUpperCase() : attr.name.toUpperCase();
-      attrs[key] = attr.value_name;
+      if (!attr) continue;
+      const val = (attr.value_name || (attr as any).value || "").trim();
+      if (!val) continue;
+      const idKey = (attr.id || "").toUpperCase().trim();
+      const nameKey = (attr.name || "").trim();
+      if (idKey) attrs[idKey] = val;
+      if (nameKey) attrs[nameKey] = val;
     }
   }
 
@@ -1289,24 +1388,52 @@ export function processarItemML(
     item.title
   );
 
-  // Extração da Marca com prioridade para dados técnicos e BRAND dos atributos
+  // 1. Extração da Marca: prioridade máxima para atributo id 'BRAND' da API
   const attrMarca = item.attributes?.find(
-    (a: any) => a.id === "BRAND" || a.name?.toLowerCase() === "marca"
-  )?.value_name;
+    (a: any) => (a?.id || "").toUpperCase().trim() === "BRAND" && (a?.value_name || a?.value)?.trim()
+  );
+  const marcaFromApi = (attrMarca?.value_name || (attrMarca as any)?.value)?.trim();
 
-  let marca = dados_tecnicos.marca || attrMarca || attrs["BRAND"] || attrs["MARCA"] || null;
-  if (!marca || marca === "Auto Peças") {
-    marca = deduzirMarca(queryOriginal) || deduzirMarca(item.title) || "Auto Peças";
-  }
+  let marca =
+    marcaFromApi ||
+    attrs["BRAND"] ||
+    attrs["MARCA"] ||
+    dados_tecnicos.marca ||
+    deduzirMarca(queryOriginal) ||
+    deduzirMarca(item.title) ||
+    "Auto Peças";
+
+  // 2. Extração do Código do Fabricante: prioridade máxima para PART_NUMBER, MPN ou OEM da API
+  const attrPartNumber = item.attributes?.find(
+    (a: any) => (a?.id || "").toUpperCase().trim() === "PART_NUMBER" && (a?.value_name || a?.value)?.trim()
+  );
+  const attrMpn = item.attributes?.find(
+    (a: any) => (a?.id || "").toUpperCase().trim() === "MPN" && (a?.value_name || a?.value)?.trim()
+  );
+  const attrOem = item.attributes?.find(
+    (a: any) => (a?.id || "").toUpperCase().trim() === "OEM" && (a?.value_name || a?.value)?.trim()
+  );
+
+  const codigoFromApi =
+    (attrPartNumber?.value_name || (attrPartNumber as any)?.value)?.trim() ||
+    (attrMpn?.value_name || (attrMpn as any)?.value)?.trim() ||
+    (attrOem?.value_name || (attrOem as any)?.value)?.trim();
 
   const numeroPeca =
-    dados_tecnicos.codigo_fabricante ||
+    codigoFromApi ||
     attrs["PART_NUMBER"] ||
+    attrs["MPN"] ||
+    attrs["OEM"] ||
     attrs["NUMERO_DE_PECA"] ||
+    attrs["NÚMERO DE PEÇA"] ||
     attrs["CODIGO_DE_FABRICANTE"] ||
+    attrs["CODIGO_FABRICANTE"] ||
+    dados_tecnicos.codigo_fabricante ||
+    dados_tecnicos.mpn ||
+    dados_tecnicos.numero_peca ||
     deduzirCodigo(item.title, marca);
 
-  const oem = dados_tecnicos.codigo_oem || attrs["OEM"] || attrs["CODIGO_OEM"] || null;
+  const oem = codigoFromApi && attrOem ? codigoFromApi : (dados_tecnicos.codigo_oem || attrs["OEM"] || attrs["CODIGO_OEM"] || null);
   const modelo = attrs["MODEL"] || attrs["MODELO"] || undefined;
 
   // 1. Preço atual de venda

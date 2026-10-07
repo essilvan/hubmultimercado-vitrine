@@ -478,21 +478,56 @@ export async function POST(request: NextRequest) {
     if (mlbId) {
       try {
         const [detalhesRes, descRes] = await Promise.all([
-          consultarDetalhesItemML(mlbId).catch(() => null),
-          obterDescricaoItemML(mlbId).catch(() => null),
+          consultarDetalhesItemML(mlbId).catch((err) => {
+            console.error(`[importar-link-ml] Erro ao consultar detalhes do item ${mlbId}:`, err);
+            return null;
+          }),
+          obterDescricaoItemML(mlbId).catch((err) => {
+            console.error(`[importar-link-ml] Erro ao consultar descrição do item ${mlbId}:`, err);
+            return null;
+          }),
         ]);
         itemApi = detalhesRes;
         descApi = descRes;
+        if (!descApi) {
+          console.warn(`[importar-link-ml] Descrição da API ML não retornou para ${mlbId}. Tentando obter via HTML.`);
+        }
       } catch (apiErr) {
-        console.warn("Aviso ao consultar endpoints do Mercado Livre para o item:", mlbId, apiErr);
+        console.error(`[importar-link-ml] Aviso ao consultar endpoints do Mercado Livre para o item: ${mlbId}`, apiErr);
+      }
+    }
+
+    // Se a página for um landing page social ou não tiver tabelas de especificações, busca o HTML direto do produto no Mercado Livre
+    let pdpHtml = html;
+    if (mlbId && (finalUrl.includes("/social/") || !html.includes("<tr"))) {
+      try {
+        const cleanMlb = mlbId.startsWith("MLB-") ? mlbId : mlbId.replace(/^MLB/i, "MLB-");
+        const pdpRes = await fetch(`https://produto.mercadolivre.com.br/${cleanMlb}`, {
+          headers: {
+            "User-Agent":
+              "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+            Accept:
+              "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "pt-BR,pt;q=0.9",
+          },
+        });
+        if (pdpRes.ok) {
+          const directHtml = await pdpRes.text();
+          if (directHtml.length > 5000 && directHtml.includes("<tr")) {
+            pdpHtml = directHtml;
+          }
+        }
+      } catch (pdpErr) {
+        console.warn("[importar-link-ml] Aviso ao buscar HTML direto do produto:", pdpErr);
       }
     }
 
     // 4. Extração do Título
     const titleMatch =
+      pdpHtml.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i) ||
+      pdpHtml.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:title["']/i) ||
       html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i) ||
       html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:title["']/i) ||
-      html.match(/<meta[^>]+name=["']twitter:title["'][^>]+content=["']([^"']+)["']/i) ||
       html.match(/<title>([^<]+)<\/title>/i);
 
     let rawTitle = itemApi?.title || (titleMatch && titleMatch[1] ? titleMatch[1].trim() : "");
@@ -526,18 +561,19 @@ export async function POST(request: NextRequest) {
 
     if (!imageUrl) {
       const ogImageMatch =
+        pdpHtml.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i) ||
+        pdpHtml.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i) ||
         html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i) ||
-        html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i) ||
-        html.match(/<meta[^>]+name=["']twitter:image["'][^>]+content=["']([^"']+)["']/i);
+        html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i);
 
       if (ogImageMatch && ogImageMatch[1]) {
         imageUrl = obterImagemAltaResolucao(ogImageMatch[1].trim().replace(/&amp;/g, "&"));
       } else {
-        const jsonLdImgMatch = html.match(/"image":\s*"([^"]+)"/i);
+        const jsonLdImgMatch = pdpHtml.match(/"image":\s*"([^"]+)"/i) || html.match(/"image":\s*"([^"]+)"/i);
         if (jsonLdImgMatch && jsonLdImgMatch[1]) {
           imageUrl = obterImagemAltaResolucao(jsonLdImgMatch[1].replace(/\\u002F/g, "/"));
         } else {
-          const mlstaticMatch = html.match(/https:\/\/http2\.mlstatic\.com\/D_[^"'\s\)]+/i);
+          const mlstaticMatch = pdpHtml.match(/https:\/\/http2\.mlstatic\.com\/D_[^"'\s\)]+/i) || html.match(/https:\/\/http2\.mlstatic\.com\/D_[^"'\s\)]+/i);
           if (mlstaticMatch) {
             imageUrl = obterImagemAltaResolucao(mlstaticMatch[0].replace(/&amp;/g, "&"));
           }
@@ -550,7 +586,7 @@ export async function POST(request: NextRequest) {
     }
 
     // 6. Extração de Preços (Atual promocional, Original e Desconto)
-    const { precoEstimado, precoAntigo, descontoPercentual } = extrairPrecosMercadoLivre(html);
+    const { precoEstimado, precoAntigo, descontoPercentual } = extrairPrecosMercadoLivre(pdpHtml.includes("<tr") ? pdpHtml : html);
 
     let precoEstimadoFormatado = precoEstimado;
     if (!precoEstimadoFormatado && itemApi?.price && itemApi.price > 0) {
@@ -563,18 +599,23 @@ export async function POST(request: NextRequest) {
     }
 
     // 7. Descrição Completa (plain_text da API oficial com fallback para HTML limpo)
-    const descricaoHtmlLimpa = extrairDescricaoHtml(html);
+    const descricaoHtmlLimpa = extrairDescricaoHtml(pdpHtml) || extrairDescricaoHtml(html);
     const descricaoCompleta = (descApi && descApi.trim()) ? descApi.trim() : (descricaoHtmlLimpa || "");
 
-    // 8. Atributos Técnicos (mesclagem de attributes da API e da tabela HTML)
-    const tabelaAttrs = extrairTabelaEspecificacoesHtml(html);
+    // 8. Atributos Técnicos (mesclagem de attributes da API e da tabela HTML do produto)
+    const tabelaAttrs = extrairTabelaEspecificacoesHtml(pdpHtml);
     const combinedAttrs: Record<string, string | undefined> = { ...tabelaAttrs };
 
     if (Array.isArray(itemApi?.attributes)) {
       for (const attr of itemApi.attributes) {
-        if (!attr.value_name) continue;
-        const key = attr.id ? attr.id.toUpperCase() : attr.name.toUpperCase();
-        combinedAttrs[key] = attr.value_name;
+        if (!attr) continue;
+        const val = (attr.value_name || (attr as any).value || "").trim();
+        if (!val) continue;
+
+        const idKey = (attr.id || "").toUpperCase().trim();
+        const nameKey = (attr.name || "").trim();
+        if (idKey) combinedAttrs[idKey] = val;
+        if (nameKey) combinedAttrs[nameKey] = val;
       }
     }
 
@@ -585,14 +626,43 @@ export async function POST(request: NextRequest) {
       rawTitle
     );
 
-    // Mapeamento específico dos 7 atributos técnicos solicitados:
-    // MARCA, MODELO, MPN, OEM, LADO, POSICAO e NÚMERO DE PEÇA
+    // 1. Marca: prioridade máxima para atributo id 'BRAND' da API do Mercado Livre
+    const brandAttrApi = Array.isArray(itemApi?.attributes)
+      ? itemApi.attributes.find(
+          (a: any) => (a?.id || "").toUpperCase().trim() === "BRAND" && (a?.value_name || a?.value)?.trim()
+        )
+      : null;
+    const marcaFromApi = (brandAttrApi?.value_name || (brandAttrApi as any)?.value)?.trim();
+
     const marca =
-      dados_tecnicos.marca ||
+      marcaFromApi ||
       combinedAttrs["BRAND"] ||
       combinedAttrs["MARCA"] ||
-      deduzirMarca(rawTitle) ||
+      combinedAttrs["Marca"] ||
+      combinedAttrs["Fabricante"] ||
+      (dados_tecnicos.marca && dados_tecnicos.marca !== "Auto Peças" ? dados_tecnicos.marca : null) ||
+      (deduzirMarca(rawTitle) !== "Auto Peças" ? deduzirMarca(rawTitle) : null) ||
       "Auto Peças";
+
+    // 2. Código do Fabricante: busca no array 'attributes' da API por 'PART_NUMBER', 'MPN' ou 'OEM'
+    let codigoFromApi: string | null = null;
+    if (Array.isArray(itemApi?.attributes)) {
+      const partNumAttr = itemApi.attributes.find(
+        (a: any) => (a?.id || "").toUpperCase().trim() === "PART_NUMBER" && (a?.value_name || a?.value)?.trim()
+      );
+      const mpnAttr = itemApi.attributes.find(
+        (a: any) => (a?.id || "").toUpperCase().trim() === "MPN" && (a?.value_name || a?.value)?.trim()
+      );
+      const oemAttr = itemApi.attributes.find(
+        (a: any) => (a?.id || "").toUpperCase().trim() === "OEM" && (a?.value_name || a?.value)?.trim()
+      );
+
+      codigoFromApi =
+        (partNumAttr?.value_name || (partNumAttr as any)?.value)?.trim() ||
+        (mpnAttr?.value_name || (mpnAttr as any)?.value)?.trim() ||
+        (oemAttr?.value_name || (oemAttr as any)?.value)?.trim() ||
+        null;
+    }
 
     const modelo =
       dados_tecnicos.modelo ||
@@ -601,6 +671,7 @@ export async function POST(request: NextRequest) {
       undefined;
 
     const mpn =
+      codigoFromApi ||
       dados_tecnicos.mpn ||
       combinedAttrs["MPN"] ||
       combinedAttrs["MANUFACTURER_PART_NUMBER"] ||
@@ -609,17 +680,22 @@ export async function POST(request: NextRequest) {
       combinedAttrs["CODIGO_FABRICANTE"];
 
     const numeroPeca =
+      mpn ||
       dados_tecnicos.numero_peca ||
       combinedAttrs["NUMERO_DE_PECA"] ||
       combinedAttrs["NÚMERO DE PEÇA"] ||
+      combinedAttrs["Número de peça"] ||
       combinedAttrs["PART_NUMBER"] ||
       combinedAttrs["PIECE_NUMBER"] ||
-      mpn ||
-      deduzirCodigo(rawTitle, marca);
+      dados_tecnicos.codigo_fabricante ||
+      (deduzirCodigo(rawTitle, marca) !== "COD-ML" && !deduzirCodigo(rawTitle, marca).endsWith("-PEC")
+        ? deduzirCodigo(rawTitle, marca)
+        : null);
 
-    const codigoFabricanteFinal = mpn || numeroPeca;
+    const codigoFabricanteFinal = numeroPeca || (marca !== "Auto Peças" ? `${marca}-PEC` : "COD-ML");
 
     const oem =
+      (codigoFromApi && combinedAttrs["OEM"]) ||
       dados_tecnicos.codigo_oem ||
       combinedAttrs["OEM"] ||
       combinedAttrs["OEM_PART_NUMBER"] ||
@@ -775,6 +851,8 @@ export async function POST(request: NextRequest) {
         categoria,
         veiculos_compativeis,
         codigo_oem: oem,
+        descricao: descricaoCompleta || null,
+        aplicacao: aplicacao,
         especificacoes: especificacoesJsonb,
         updated_at: new Date().toISOString(),
       };
