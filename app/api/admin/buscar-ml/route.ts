@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { buscarProdutoML } from "@/lib/mercadolivre";
+import { gerarSlugUnicoNoBanco } from "@/lib/slug";
 
 export const runtime = "nodejs";
 
@@ -96,13 +97,82 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // 2. Salva / Upsert direto no Supabase (tabela produtos_afiliados)
+    // 2. Trava prévia por ml_id: se já existe, sincroniza preços e preserva id e slug originais
     const supabase = getSupabaseClient();
+    const mlbId = (resultado.id || produtoDados.ml_id || "").replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+
+    if (mlbId) {
+      const { data: existentePorMlId } = await supabase
+        .from("produtos_afiliados")
+        .select("*")
+        .or(`ml_id.eq.${mlbId},especificacoes->>ml_id.eq.${mlbId}`)
+        .limit(1)
+        .maybeSingle();
+
+      if (existentePorMlId && existentePorMlId.id) {
+        const payloadUpdate = {
+          ml_id: mlbId,
+          preco_estimado: produtoDados.preco_estimado,
+          preco_antigo: produtoDados.preco_antigo || null,
+          desconto_percentual: produtoDados.desconto_percentual || null,
+          ultima_sincronizacao: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          especificacoes: {
+            ...(existentePorMlId.especificacoes || {}),
+            ml_id: mlbId,
+            preco: produtoDados.preco_estimado,
+            preco_antigo: produtoDados.preco_antigo || null,
+            desconto_percentual: produtoDados.desconto_percentual || null,
+            ultima_sincronizacao: new Date().toISOString(),
+          },
+        };
+
+        const { data: produtoAtualizado, error: errUpdate } = await supabase
+          .from("produtos_afiliados")
+          .update(payloadUpdate)
+          .eq("id", existentePorMlId.id)
+          .select()
+          .single();
+
+        if (errUpdate) {
+          console.warn("Aviso ao atualizar preços de produto existente:", errUpdate.message);
+        }
+
+        const prodFinal = produtoAtualizado || existentePorMlId;
+
+        return NextResponse.json({
+          success: true,
+          alreadyExists: true,
+          message: "Produto já cadastrado! Dados e preços foram sincronizados.",
+          produto: {
+            ...prodFinal,
+            preco: prodFinal.preco_estimado,
+          },
+          resultadoML: resultado,
+        });
+      }
+    }
+
+    // 3. Produto novo: gera slug único limpo (apenas adicionando hash se houver colisão de slug no banco)
+    const slugUnico = await gerarSlugUnicoNoBanco(
+      supabase,
+      {
+        titulo: produtoDados.titulo,
+        marca: produtoDados.marca,
+        modelo: (produtoDados.especificacoes as any)?.dados_tecnicos?.modelo,
+        veiculo: produtoDados.veiculos_compativeis,
+        codigo: produtoDados.codigo_fabricante,
+        hash: mlbId ? mlbId.replace(/\D/g, "").slice(-4) : Date.now().toString().slice(-4),
+      },
+      undefined,
+      mlbId
+    );
 
     // Objeto limpo estritamente mapeado com as colunas reais da tabela produtos_afiliados
     const recordParaSalvar = {
+      ml_id: mlbId || null,
       titulo: produtoDados.titulo,
-      slug: produtoDados.slug,
+      slug: slugUnico,
       codigo_fabricante: produtoDados.codigo_fabricante,
       marca: produtoDados.marca, // Marca oficial (ex: "SYL")
       categoria: produtoDados.categoria || "Autopeças",
@@ -119,6 +189,7 @@ export async function POST(request: NextRequest) {
       palavras_chave: produtoDados.palavras_chave || produtoDados.especificacoes?.palavras_chave || [],
       especificacoes: {
         ...(produtoDados.especificacoes || {}),
+        ml_id: mlbId || undefined,
         marca: produtoDados.marca,
         preco: produtoDados.preco_estimado,
         preco_antigo: produtoDados.preco_antigo || null,
@@ -128,49 +199,23 @@ export async function POST(request: NextRequest) {
         palavras_chave: produtoDados.palavras_chave || produtoDados.especificacoes?.palavras_chave || [],
         dados_tecnicos: produtoDados.especificacoes?.dados_tecnicos || {},
       },
+      created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };
 
-    // Verifica se já existe um produto com o mesmo slug ou código
-    const { data: existente } = await supabase
+    const { data: produtoSalvo, error: insertError } = await supabase
       .from("produtos_afiliados")
-      .select("id, slug")
-      .or(`slug.eq.${recordParaSalvar.slug},codigo_fabricante.eq.${recordParaSalvar.codigo_fabricante}`)
-      .limit(1)
-      .maybeSingle();
+      .upsert(recordParaSalvar, { onConflict: "slug" })
+      .select()
+      .single();
 
-    let produtoSalvo;
-
-    if (existente && existente.id) {
-      const { data, error } = await supabase
-        .from("produtos_afiliados")
-        .update(recordParaSalvar)
-        .eq("id", existente.id)
-        .select()
-        .single();
-
-      if (error) {
-        throw new Error(`Erro ao atualizar produto existente no Supabase: ${error.message}`);
-      }
-      produtoSalvo = data;
-    } else {
-      const { data, error } = await supabase
-        .from("produtos_afiliados")
-        .insert({
-          ...recordParaSalvar,
-          created_at: new Date().toISOString(),
-        })
-        .select()
-        .single();
-
-      if (error) {
-        throw new Error(`Erro ao cadastrar produto no Supabase: ${error.message}`);
-      }
-      produtoSalvo = data;
+    if (insertError) {
+      throw new Error(`Erro ao cadastrar produto no Supabase: ${insertError.message}`);
     }
 
     return NextResponse.json({
       success: true,
+      alreadyExists: false,
       message: `Produto "${produtoSalvo.titulo}" cadastrado com sucesso na vitrine!`,
       produto: {
         ...produtoSalvo,

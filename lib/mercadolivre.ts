@@ -95,6 +95,7 @@ export interface ProdutoMLExtraido {
   };
   // Objeto estruturado pronto para exibição e salvamento na tabela produtos_afiliados do Supabase
   produtoProntoParaSalvar: {
+    ml_id?: string;
     titulo: string;
     slug: string;
     codigo_fabricante: string;
@@ -1506,6 +1507,7 @@ export function processarItemML(
     produtoProntoParaSalvar: {
       titulo: item.title,
       slug: slug,
+      ml_id: item.id,
       codigo_fabricante: numeroPeca,
       marca: marca,
       categoria: categoria,

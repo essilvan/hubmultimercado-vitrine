@@ -30,6 +30,7 @@ import { supabase } from "@/lib/supabase";
 
 export interface AdminProduct {
   id: string;
+  ml_id?: string | null;
   titulo: string;
   slug: string;
   codigo_fabricante: string;
@@ -213,11 +214,16 @@ export default function AdminPanel() {
 
       const novoProduto = data.produto as AdminProduct;
 
-      // Adiciona o novo produto ao topo da lista sem recarregar a página
-      setProducts((prev) => [
-        novoProduto,
-        ...prev.filter((p) => p.id !== novoProduto.id && p.slug !== novoProduto.slug),
-      ]);
+      // Atualiza produto na lista existente ou adiciona ao topo
+      setProducts((prev) => {
+        const existe = prev.some((p) => p.id === novoProduto.id || p.slug === novoProduto.slug);
+        if (existe) {
+          return prev.map((p) =>
+            p.id === novoProduto.id || p.slug === novoProduto.slug ? { ...p, ...novoProduto } : p
+          );
+        }
+        return [novoProduto, ...prev];
+      });
 
       const directLink =
         novoProduto.link_afiliado ||
@@ -227,6 +233,15 @@ export default function AdminPanel() {
       setEditedLinks((prev) => ({ ...prev, [novoProduto.id]: directLink }));
 
       setSearchCodeQuery("");
+
+      if (data.alreadyExists) {
+        setToast({
+          type: "info",
+          title: "Produto Já Cadastrado!",
+          message: data.message || "Produto já cadastrado! Dados e preços foram sincronizados.",
+        });
+        return;
+      }
 
       setToast({
         type: "success",
@@ -277,11 +292,16 @@ export default function AdminPanel() {
 
       const novoProduto = data.produto as AdminProduct;
 
-      // Adiciona o novo produto ao topo da lista sem recarregar a página
-      setProducts((prev) => [
-        novoProduto,
-        ...prev.filter((p) => p.id !== novoProduto.id && p.slug !== novoProduto.slug),
-      ]);
+      // Atualiza produto na lista existente ou adiciona ao topo
+      setProducts((prev) => {
+        const existe = prev.some((p) => p.id === novoProduto.id || p.slug === novoProduto.slug);
+        if (existe) {
+          return prev.map((p) =>
+            p.id === novoProduto.id || p.slug === novoProduto.slug ? { ...p, ...novoProduto } : p
+          );
+        }
+        return [novoProduto, ...prev];
+      });
 
       const directLink =
         novoProduto.link_afiliado ||
@@ -290,6 +310,15 @@ export default function AdminPanel() {
       setEditedLinks((prev) => ({ ...prev, [novoProduto.id]: directLink }));
 
       setImportUrl("");
+
+      if (data.alreadyExists) {
+        setToast({
+          type: "info",
+          title: "Produto Já Cadastrado!",
+          message: data.message || "Produto já cadastrado! Dados e preços foram sincronizados.",
+        });
+        return;
+      }
 
       const qtdKeywords =
         (Array.isArray(data.dadosExtraidos?.palavras_chave) ? data.dadosExtraidos.palavras_chave.length : 0) ||
@@ -1035,6 +1064,11 @@ export default function AdminPanel() {
                             {item.codigo_oem && (
                               <div className="text-[11px] font-mono text-slate-400">
                                 OEM: <span className="text-slate-300">{item.codigo_oem}</span>
+                              </div>
+                            )}
+                            {(item.ml_id || (item.especificacoes as any)?.ml_id) && (
+                              <div className="text-[10px] font-mono text-emerald-400 font-medium">
+                                ML: {item.ml_id || (item.especificacoes as any)?.ml_id}
                               </div>
                             )}
                           </div>

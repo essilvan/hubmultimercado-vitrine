@@ -10,7 +10,7 @@ import {
   gerarPalavrasChave,
   obterImagemAltaResolucao,
 } from "@/lib/mercadolivre";
-import { gerarSlugProduto, limparSlug, gerarSlug as generateSlug } from "@/lib/slug";
+import { gerarSlugProduto, limparSlug, gerarSlugUnicoNoBanco, gerarSlug as generateSlug } from "@/lib/slug";
 
 export const runtime = "nodejs";
 
@@ -353,6 +353,71 @@ function extrairPrecosMercadoLivre(html: string): {
   };
 }
 
+/**
+ * Trava definitiva contra duplicados:
+ * Consulta o Supabase por ml_id. Se já existir, atualiza preço, desconto, updated_at e salva explicitamente ml_id,
+ * preservando o mesmo id e slug original para não quebrar links já indexados no Google.
+ */
+async function verificarEAtualizarProdutoExistente(
+  supabase: ReturnType<typeof getSupabaseClient>,
+  mlbId: string
+) {
+  const { data: produtoExistente } = await supabase
+    .from("produtos_afiliados")
+    .select("*")
+    .or(`ml_id.eq.${mlbId},especificacoes->>ml_id.eq.${mlbId}`)
+    .limit(1)
+    .maybeSingle();
+
+  if (!produtoExistente || !produtoExistente.id) {
+    return null;
+  }
+
+  let precoEstimado = produtoExistente.preco_estimado;
+  let precoAntigo = produtoExistente.preco_antigo;
+  let descontoPercentual = produtoExistente.desconto_percentual;
+
+  try {
+    const detalhes = await consultarDetalhesItemML(mlbId);
+    if (detalhes && detalhes.price) {
+      precoEstimado = formatBrl(detalhes.price);
+      if (detalhes.original_price && detalhes.original_price > detalhes.price) {
+        precoAntigo = formatBrl(detalhes.original_price);
+        const desc = Math.round(((detalhes.original_price - detalhes.price) / detalhes.original_price) * 100);
+        if (desc > 0) descontoPercentual = `${desc}% OFF`;
+      }
+    }
+  } catch (errApi) {
+    console.warn("Aviso ao buscar detalhes de preço na API do ML para produto existente:", errApi);
+  }
+
+  const payloadUpdate = {
+    ml_id: mlbId,
+    preco_estimado: precoEstimado,
+    preco_antigo: precoAntigo,
+    desconto_percentual: descontoPercentual,
+    ultima_sincronizacao: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    especificacoes: {
+      ...(produtoExistente.especificacoes || {}),
+      ml_id: mlbId,
+      preco: precoEstimado,
+      preco_antigo: precoAntigo,
+      desconto_percentual: descontoPercentual,
+      ultima_sincronizacao: new Date().toISOString(),
+    },
+  };
+
+  const { data: produtoAtualizado } = await supabase
+    .from("produtos_afiliados")
+    .update(payloadUpdate)
+    .eq("id", produtoExistente.id)
+    .select()
+    .single();
+
+  return produtoAtualizado || produtoExistente;
+}
+
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
@@ -378,7 +443,23 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // 1. Efetuar fetch com cabeçalhos simulando navegador, com fallback para preview bot para contornar antibot
+    const supabase = getSupabaseClient();
+
+    // 1. Verificação prévia instantânea se o link já contiver o código MLB diretamente na URL
+    const directMlbId = extrairItemIdML(trimmedUrl);
+    if (directMlbId) {
+      const existente = await verificarEAtualizarProdutoExistente(supabase, directMlbId);
+      if (existente) {
+        return NextResponse.json({
+          success: true,
+          alreadyExists: true,
+          message: "Produto já cadastrado! Dados e preços foram sincronizados.",
+          produto: existente,
+        });
+      }
+    }
+
+    // 2. Efetuar fetch com cabeçalhos simulando navegador, com fallback para preview bot para contornar antibot
     let html = "";
     let finalUrl = trimmedUrl;
 
@@ -457,6 +538,19 @@ export async function POST(request: NextRequest) {
 
       if (mlbMatchInHtml && mlbMatchInHtml[1]) {
         mlbId = mlbMatchInHtml[1].replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+      }
+    }
+
+    // Trava prévia adicional caso o mlbId tenha sido descoberto via redirecionamento de shortlink ou HTML
+    if (mlbId && !directMlbId) {
+      const existente = await verificarEAtualizarProdutoExistente(supabase, mlbId);
+      if (existente) {
+        return NextResponse.json({
+          success: true,
+          alreadyExists: true,
+          message: "Produto já cadastrado! Dados e preços foram sincronizados.",
+          produto: existente,
+        });
       }
     }
 
@@ -732,19 +826,22 @@ export async function POST(request: NextRequest) {
       atributos: combinedAttrs,
     });
 
-    // 10. Geração de Slug semântico para SEO: [nome-da-peca]-[marca]-[modelo-carro]-[codigo-opcional]-[hash-unico]
-    const slug = gerarSlugProduto({
-      titulo: rawTitle,
-      marca,
-      modelo,
-      veiculo: veiculos_compativeis,
-      codigo: codigoFabricanteFinal,
-      hash: Date.now().toString().slice(-4),
-    });
+    // 10. Geração de Slug semântico para SEO: [nome-da-peca]-[marca]-[modelo-carro]-[codigo-opcional]-[hash-unico-apenas-se-colisao]
+    const slug = await gerarSlugUnicoNoBanco(
+      supabase,
+      {
+        titulo: rawTitle,
+        marca,
+        modelo,
+        veiculo: veiculos_compativeis,
+        codigo: codigoFabricanteFinal,
+        hash: mlbId ? mlbId.replace(/\D/g, "").slice(-4) : Date.now().toString().slice(-4),
+      },
+      undefined,
+      mlbId
+    );
 
     // 11. Gravação na Tabela produtos_afiliados do Supabase
-    const supabase = getSupabaseClient();
-
     const dadosTecnicosCompletos = {
       ...dados_tecnicos,
       marca,
@@ -788,6 +885,7 @@ export async function POST(request: NextRequest) {
     };
 
     const recordData: Record<string, unknown> = {
+      ml_id: mlbId || null,
       titulo: rawTitle,
       slug,
       marca,
@@ -836,6 +934,7 @@ export async function POST(request: NextRequest) {
     // Se ainda houver erro de coluna inexistente, salva campos essenciais preservando tudo em 'especificacoes'
     if (insertResult.error) {
       const fallbackRecord: Record<string, unknown> = {
+        ml_id: mlbId || null,
         titulo: rawTitle,
         slug,
         marca,
@@ -882,6 +981,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
+      alreadyExists: false,
       produto: produtoRetornado,
       dadosExtraidos: {
         titulo: rawTitle,

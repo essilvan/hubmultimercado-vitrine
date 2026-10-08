@@ -1,9 +1,12 @@
 /**
  * Utilitários para geração, limpeza e padronização de slugs amigáveis e semânticos para SEO.
  *
- * Formato oficial: [nome-da-peca]-[marca]-[modelo-carro]-[codigo-opcional]-[hash-unico]
- * Exemplo: "kit-disco-pastilha-freio-hb20-hb20s-1-0-1321"
+ * Formato oficial: [nome-da-peca]-[marca]-[modelo-carro]-[codigo-opcional]-[hash-unico-apenas-se-colisao]
+ * Exemplo padrão: "kit-disco-pastilha-freio-hb20-hb20s-1-0"
+ * Exemplo em caso de colisão: "kit-disco-pastilha-freio-hb20-hb20s-1-0-1321"
  */
+
+import type { SupabaseClient } from "@supabase/supabase-js";
 
 // Marcas automotivas conhecidas no mercado brasileiro
 export const MARCAS_AUTOMOTIVAS = [
@@ -435,19 +438,15 @@ export function limparSlug(slugExistente: string): string {
 }
 
 /**
- * Gera um slug padronizado, limpo e semântico para SEO no formato:
- * [nome-da-peca]-[marca]-[modelo-carro]-[codigo-opcional]-[hash-unico]
- *
- * Exemplo desejado:
- * "kit-disco-pastilha-freio-hb20-hb20s-1-0-1321" em vez de "auto-pecas-cod-ml-kit-disco-pastilha-freio-hb20-hb20s-10-1321"
+ * Gera o slug base sem hash:
+ * [nome-da-peca]-[marca]-[modelo-carro]-[codigo-opcional]
  */
-export function gerarSlugProduto(params: GerarSlugProdutoParams | string): string {
-  // Sobrecarga para quando uma string simples ou slug já existente for passado
+export function gerarBaseSlugProduto(params: Omit<GerarSlugProdutoParams, "hash"> | string): string {
   if (typeof params === "string") {
     return limparSlug(params);
   }
 
-  const { titulo, marca, modelo, veiculo, codigo, hash } = params;
+  const { titulo, marca, modelo, veiculo, codigo } = params;
 
   if (!titulo || !titulo.trim()) {
     return `peca-${Date.now().toString().slice(-4)}`;
@@ -574,16 +573,7 @@ export function gerarSlugProduto(params: GerarSlugProdutoParams | string): strin
     }
   }
 
-  // 6. [hash-unico] (4 caracteres para garantir unicidade e evitar conflito de rotas)
-  let hashSlug = "";
-  if (hash && typeof hash === "string" && hash.trim()) {
-    hashSlug = gerarSlug(hash).replace(/[^a-z0-9]/g, "").slice(-4);
-  }
-  if (!hashSlug || hashSlug.length < 2) {
-    hashSlug = Date.now().toString().slice(-4);
-  }
-
-  // 7. Monta o slug ordenado: [nome-da-peca]-[marca]-[modelo-carro]-[codigo-opcional]-[hash-unico]
+  // 6. Monta o slug ordenado: [nome-da-peca]-[marca]-[modelo-carro]-[codigo-opcional]
   const partes: string[] = [];
 
   if (pecaSlug) {
@@ -608,15 +598,82 @@ export function gerarSlugProduto(params: GerarSlugProdutoParams | string): strin
     partes.push(codigoSlug);
   }
 
-  if (hashSlug) {
-    partes.push(hashSlug);
-  }
-
   const slugFinal = partes.join("-").replace(/-+/g, "-").replace(/^-+|-+$/g, "");
-
-  // Aplica a limpeza final de prefixos para assegurar total conformidade
   return limparSlug(slugFinal);
 }
 
-export { gerarSlug as generateSlug };
+/**
+ * Gera um slug padronizado, limpo e semântico para SEO no formato:
+ * [nome-da-peca]-[marca]-[modelo-carro]-[codigo-opcional]-[hash-se-informado]
+ */
+export function gerarSlugProduto(params: GerarSlugProdutoParams | string): string {
+  if (typeof params === "string") {
+    return limparSlug(params);
+  }
 
+  const baseSlug = gerarBaseSlugProduto(params);
+  const { hash } = params;
+
+  if (hash && typeof hash === "string" && hash.trim()) {
+    const hashSlug = gerarSlug(hash).replace(/[^a-z0-9]/g, "").slice(-4);
+    if (hashSlug && hashSlug.length >= 2) {
+      return limparSlug(`${baseSlug}-${hashSlug}`);
+    }
+  }
+
+  return baseSlug;
+}
+
+/**
+ * Garante que a geração do slug verifique se o slug pretendido já existe no banco.
+ * Se já existir e for de outro produto, acrescenta o hash identificador único apenas nesse caso.
+ */
+export async function gerarSlugUnicoNoBanco(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  supabase: SupabaseClient<any, any, any>,
+  params: GerarSlugProdutoParams,
+  produtoIdAtual?: string | null,
+  mlIdAtual?: string | null
+): Promise<string> {
+  const baseSlug = gerarBaseSlugProduto(params);
+
+  // Consulta se o slug base já existe no banco
+  let query = supabase.from("produtos_afiliados").select("id, ml_id, slug").eq("slug", baseSlug);
+
+  if (produtoIdAtual) {
+    query = query.neq("id", produtoIdAtual);
+  }
+
+  const { data: existente } = await query.limit(1).maybeSingle();
+
+  // Se não existe ou é do mesmo produto (por ml_id), usa o slug limpo sem hash
+  if (!existente || (mlIdAtual && existente.ml_id === mlIdAtual)) {
+    return baseSlug;
+  }
+
+  // Colisão com outro produto: acrescenta identificador único
+  const hashIdentificador =
+    (mlIdAtual ? mlIdAtual.replace(/\D/g, "").slice(-4) : null) ||
+    (params.hash ? params.hash.replace(/\D/g, "").slice(-4) : null) ||
+    Date.now().toString().slice(-4);
+
+  const slugComHash = `${baseSlug}-${hashIdentificador}`;
+
+  // Verifica se o slug com hash também colide
+  const { data: colidindoComHash } = await supabase
+    .from("produtos_afiliados")
+    .select("id")
+    .eq("slug", slugComHash)
+    .limit(1)
+    .maybeSingle();
+
+  if (!colidindoComHash || colidindoComHash.id === produtoIdAtual) {
+    return slugComHash;
+  }
+
+  // Fallback extremo de colisão dupla
+  const randomSuffix = Math.random().toString(36).substring(2, 6);
+  return `${baseSlug}-${hashIdentificador}-${randomSuffix}`;
+}
+
+export { gerarSlug as generateSlug };
