@@ -146,21 +146,9 @@ export function formatarLinkAfiliado(permalink: string): string {
   return `${permalink}${separator}matt_tool=${mattTool}&matt_word=${mattWord}&forceInApp=true`;
 }
 
-/**
- * Gera slug limpo a partir de texto
- */
-export function gerarSlug(text: string): string {
-  return text
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9\s-]/g, "")
-    .replace(/\s+/g, "-")
-    .replace(/-+/g, "-")
-    .slice(0, 90)
-    .replace(/^-+|-+$/g, "");
-}
+// Utilitários canônicos de slug importados e re-exportados
+import { gerarSlug, gerarSlugProduto, limparSlug } from "./slug";
+export { gerarSlug, gerarSlugProduto, limparSlug };
 
 /**
  * Extrai o ID do item MLB de uma URL ou string de texto (ex: "MLB3931144723" ou "MLB-3931144723")
@@ -1471,7 +1459,14 @@ export function processarItemML(
     }
   }
 
-  const slug = gerarSlug(item.title) || `peca-${item.id.toLowerCase()}`;
+  const slug = gerarSlugProduto({
+    titulo: item.title,
+    marca,
+    modelo,
+    veiculo: veiculos,
+    codigo: numeroPeca,
+    hash: item.id.replace(/\D/g, "").slice(-4) || Date.now().toString().slice(-4),
+  });
 
   // Geração automática de palavras-chave de alto desempenho para SEO
   const palavrasChave = gerarPalavrasChave({

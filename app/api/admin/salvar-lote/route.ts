@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import type { ItemExtraidoCatalogo } from "@/lib/catalogo-types";
-import { generateSlug } from "@/lib/catalogo-types";
+import { generateSlug, gerarSlugProduto, limparSlug } from "@/lib/slug";
 
 export const runtime = "nodejs";
 
@@ -37,10 +37,19 @@ export async function POST(request: NextRequest) {
 
     // Normaliza o payload para as colunas da tabela produtos_afiliados
     const records = items.map((item, index) => {
-      const slugBase = item.slug || generateSlug(item.titulo);
+      const slugLimpo = item.slug
+        ? limparSlug(item.slug)
+        : gerarSlugProduto({
+            titulo: item.titulo,
+            marca: item.marca,
+            veiculo: item.veiculos_compativeis,
+            codigo: item.codigo_fabricante,
+            hash: String(index).padStart(4, "0").slice(-4),
+          });
+
       return {
         titulo: item.titulo.trim(),
-        slug: slugBase || `produto-${Date.now()}-${index}`,
+        slug: slugLimpo || `produto-${Date.now()}-${index}`,
         codigo_fabricante: item.codigo_fabricante.trim(),
         marca: item.marca.trim(),
         categoria: item.categoria?.trim() || null,

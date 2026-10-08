@@ -1,9 +1,9 @@
 import * as XLSX from "xlsx";
 import { createRequire } from "node:module";
 import type { ItemExtraidoCatalogo } from "./catalogo-types";
-import { generateSlug } from "./catalogo-types";
+import { generateSlug, gerarSlugProduto, limparSlug } from "./catalogo-types";
 export type { ItemExtraidoCatalogo };
-export { generateSlug };
+export { generateSlug, gerarSlugProduto, limparSlug };
 
 // 2. Extrai texto de PDF usando pdf-parse (compatível com v2 e v1)
 export async function extractTextFromPDF(pdfBuffer: Buffer): Promise<string> {
@@ -172,7 +172,14 @@ export function buildItemObject(params: {
 
   // Requisito 2: titulo: `${tipo_peca} ${marca} ${codigo} - ${veiculo}`
   const titulo = `${tipoPeca} ${marca} ${codigoLimpo} - ${veiculoLimpo}`;
-  const slug = generateSlug(`${titulo}-${index}`);
+  // Slug semântico para SEO: [nome-da-peca]-[marca]-[modelo-carro]-[codigo-opcional]-[hash-unico]
+  const slug = gerarSlugProduto({
+    titulo,
+    marca,
+    veiculo: veiculoLimpo,
+    codigo: codigoLimpo,
+    hash: String(index).padStart(4, "0").slice(-4),
+  });
   const buscaMl = `${marca} ${codigoLimpo}`.trim();
 
   // Monta descrição rica de veículos compatíveis

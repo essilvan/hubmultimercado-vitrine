@@ -34,6 +34,15 @@ const nextConfig: NextConfig = {
     ],
   },
   serverExternalPackages: ["pdf-parse"],
+  async redirects() {
+    return [
+      {
+        source: "/produto/:slug",
+        destination: "/peca/:slug",
+        permanent: true,
+      },
+    ];
+  },
 };
 
 export default nextConfig;

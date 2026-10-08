@@ -10,6 +10,7 @@ import {
   gerarPalavrasChave,
   obterImagemAltaResolucao,
 } from "@/lib/mercadolivre";
+import { gerarSlugProduto, limparSlug, gerarSlug as generateSlug } from "@/lib/slug";
 
 export const runtime = "nodejs";
 
@@ -52,18 +53,6 @@ function isValidMercadoLivreUrl(urlString: string): boolean {
   }
 }
 
-function generateSlug(text: string): string {
-  return text
-    .toString()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9\s-]/g, "")
-    .replace(/\s+/g, "-")
-    .replace(/-+/g, "-")
-    .slice(0, 80);
-}
 
 function formatBrl(val: number | string | null | undefined): string | null {
   if (val === null || val === undefined || val === "") return null;
@@ -743,9 +732,15 @@ export async function POST(request: NextRequest) {
       atributos: combinedAttrs,
     });
 
-    // 10. Geração de Slug
-    const baseSlug = generateSlug(`${marca}-${codigoFabricanteFinal}-${rawTitle.slice(0, 40)}`);
-    const slug = `${baseSlug}-${Date.now().toString().slice(-4)}`;
+    // 10. Geração de Slug semântico para SEO: [nome-da-peca]-[marca]-[modelo-carro]-[codigo-opcional]-[hash-unico]
+    const slug = gerarSlugProduto({
+      titulo: rawTitle,
+      marca,
+      modelo,
+      veiculo: veiculos_compativeis,
+      codigo: codigoFabricanteFinal,
+      hash: Date.now().toString().slice(-4),
+    });
 
     // 11. Gravação na Tabela produtos_afiliados do Supabase
     const supabase = getSupabaseClient();

@@ -15,15 +15,6 @@ export interface ItemExtraidoCatalogo {
   preco_estimado?: number | null;
 }
 
-// Gerador de slug amigável em kebab-case
-export function generateSlug(text: string): string {
-  return text
-    .toString()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9\s-]/g, "")
-    .replace(/\s+/g, "-")
-    .replace(/-+/g, "-");
-}
+// Gerador e utilitários de slug integrados com o módulo canônico
+export { gerarSlug as generateSlug, gerarSlugProduto, limparSlug } from "./slug";
+

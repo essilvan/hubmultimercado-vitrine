@@ -1043,9 +1043,16 @@ export default function AdminPanel() {
                         {/* 3. Título e Veículos Compatíveis */}
                         <td className="py-4 px-4 align-top">
                           <div className="space-y-1.5">
-                            <div className="font-semibold text-white leading-snug line-clamp-2">
-                              {item.titulo}
-                            </div>
+                            <a
+                              href={`/peca/${item.slug}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="font-semibold text-white hover:text-amber-400 leading-snug line-clamp-2 transition inline-flex items-center gap-1.5 group/link"
+                              title="Visualizar produto na vitrine pública (/peca/[slug])"
+                            >
+                              <span>{item.titulo}</span>
+                              <ExternalLink className="w-3.5 h-3.5 opacity-40 group-hover/link:opacity-100 shrink-0 text-amber-400" />
+                            </a>
                             {item.veiculos_compativeis && (
                               <div className="flex items-start gap-1.5 text-xs text-slate-400">
                                 <Car className="w-3.5 h-3.5 text-blue-400 shrink-0 mt-0.5" />
