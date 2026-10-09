@@ -22,6 +22,11 @@ import {
   ShieldCheck,
   ShoppingBag,
   Package,
+  Check,
+  Copy,
+  MessageSquare,
+  CheckSquare,
+  Square,
 } from "lucide-react";
 
 interface ItemOrcamento {
@@ -33,12 +38,18 @@ interface ItemOrcamento {
   termo_busca_mercadolivre?: string;
   confianca?: "alta" | "media" | "baixa";
   requer_confirmacao?: boolean;
-  // Campos de enriquecimento de preço
+  // Campos de enriquecimento de preço REAL do Mercado Livre
+  preco_real_ml?: number | null;
+  preco_formatado?: string | null;
+  titulo_anuncio?: string | null;
+  link_anuncio?: string | null;
+  tem_full?: boolean;
+  thumbnail?: string | null;
+  // Campos legados para compatibilidade
   preco_medio_estimado?: string;
   preco_medio?: string;
   link_direto_anuncio?: string | null;
   preco_real?: boolean;
-  // Campos legados para compatibilidade
   nome_peca?: string;
   marca_recomendada?: string;
   query_busca?: string;
@@ -136,6 +147,9 @@ export default function OrcamentoPage() {
   const [aviso, setAviso] = useState<string | null>(null);
   const [erro, setErro] = useState<string | null>(null);
   const [avisoPopup, setAvisoPopup] = useState(false);
+  const [modalFechamentoAberto, setModalFechamentoAberto] = useState(false);
+  const [itensSelecionados, setItensSelecionados] = useState<number[]>([]);
+  const [copiadoFeedback, setCopiadoFeedback] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const cameraInputRef = useRef<HTMLInputElement | null>(null);
@@ -216,7 +230,11 @@ export default function OrcamentoPage() {
         throw new Error(data.error || "Não foi possível analisar o orçamento.");
       }
 
-      setResultado(data.data as OrcamentoResultado);
+      const orcamentoRetornado = data.data as OrcamentoResultado;
+      setResultado(orcamentoRetornado);
+      // Inicializa com todos os itens marcados por padrão
+      setItensSelecionados(orcamentoRetornado.itens.map((_, i) => i));
+
       if (data.aviso) {
         setAviso(data.aviso);
       }
@@ -227,6 +245,100 @@ export default function OrcamentoPage() {
       setErro(msg);
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  // Recálculo dinâmico baseado estritamente nos itens selecionados com preços reais do Mercado Livre
+  const totalSelecionado = (resultado?.itens || []).reduce((acc, item, idx) => {
+    if (!itensSelecionados.includes(idx)) return acc;
+    const preco = item.preco_real_ml || 0;
+    const qtd = item.quantidade || 1;
+    return acc + preco * qtd;
+  }, 0);
+
+  const totalFormatado =
+    totalSelecionado > 0
+      ? totalSelecionado.toLocaleString("pt-BR", {
+          style: "currency",
+          currency: "BRL",
+        })
+      : "Sob Consulta";
+
+  const handleToggleItem = (idx: number) => {
+    setItensSelecionados((prev) =>
+      prev.includes(idx) ? prev.filter((i) => i !== idx) : [...prev, idx]
+    );
+  };
+
+  const handleToggleTodos = () => {
+    if (!resultado?.itens) return;
+    if (itensSelecionados.length === resultado.itens.length) {
+      setItensSelecionados([]);
+    } else {
+      setItensSelecionados(resultado.itens.map((_, i) => i));
+    }
+  };
+
+  // Gera o texto estruturado para envio no WhatsApp e cópia para a área de transferência
+  const gerarTextoCotacao = () => {
+    if (!resultado) return "";
+    const veic = resultado.veiculo;
+    const veicTexto = veic
+      ? [veic.marca, veic.modelo, veic.motorizacao, veic.ano].filter(Boolean).join(" ")
+      : resultado.veiculo_detectado || "Veículo não especificado";
+
+    const placaTexto = veic?.placa ? ` | Placa: ${veic.placa}` : "";
+
+    let textoMsg = `🚗 *Orçamento de Peças - ${veicTexto}${placaTexto}*\n\n`;
+    textoMsg += `📋 *Peças Selecionadas (${itensSelecionados.length} itens):*\n`;
+
+    const itensParaEnviar = resultado.itens.filter((_, idx) => itensSelecionados.includes(idx));
+
+    if (itensParaEnviar.length === 0) {
+      textoMsg += `(Nenhuma peça selecionada)\n`;
+    } else {
+      itensParaEnviar.forEach((item, index) => {
+        const qtd = item.quantidade && item.quantidade > 1 ? `${item.quantidade}x ` : "1x ";
+        const pos = item.posicao ? ` (${item.posicao})` : "";
+        const marca =
+          item.marca_preferencial || item.marca_recomendada
+            ? ` - Marca: ${item.marca_preferencial || item.marca_recomendada}`
+            : "";
+        const precoUnit =
+          item.preco_formatado ||
+          (item.preco_real_ml
+            ? item.preco_real_ml.toLocaleString("pt-BR", { style: "currency", currency: "BRL" })
+            : "");
+        const precoTxt = precoUnit ? ` - ${precoUnit}` : "";
+        const link = item.link_anuncio || item.link_direto_anuncio;
+        const linkTxt = link ? `\n   🔗 ${link}` : "";
+
+        textoMsg += `${index + 1}. *${qtd}${item.peca_padronizada || item.nome_peca}*${pos}${marca}${precoTxt}${linkTxt}\n`;
+      });
+    }
+
+    if (totalSelecionado > 0) {
+      textoMsg += `\n💰 *Total Estimado das Peças Selecionadas:* ${totalFormatado}\n`;
+    }
+
+    textoMsg += `\nCotado com preços reais e frete Full no Mercado Livre via PeçasFinder`;
+    return textoMsg;
+  };
+
+  const handleEnviarWhatsApp = () => {
+    const msg = gerarTextoCotacao();
+    const url = `https://wa.me/?text=${encodeURIComponent(msg)}`;
+    window.open(url, "_blank");
+  };
+
+  const handleCopiarLista = async () => {
+    const msg = gerarTextoCotacao();
+    try {
+      await navigator.clipboard.writeText(msg);
+      setCopiadoFeedback(true);
+      setTimeout(() => setCopiadoFeedback(false), 3000);
+    } catch (err) {
+      console.error("Erro ao copiar para a área de transferência:", err);
     }
   };
 
@@ -565,14 +677,26 @@ Peças:
                 )}
               </div>
 
-              <div className="bg-zinc-800/80 backdrop-blur rounded-2xl p-5 border border-zinc-700/80 text-left md:text-right shrink-0">
-                <span className="text-xs text-zinc-400 block font-medium">Total Médio Estimado</span>
-                <span className="text-3xl font-black text-emerald-400 font-mono block mt-0.5">
-                  {resultado.total_estimado || "Sob Consulta"}
-                </span>
-                <span className="text-[11px] text-zinc-400 mt-1 block">
-                  Economize comprando direto no Mercado Livre
-                </span>
+              <div className="bg-zinc-800/80 backdrop-blur rounded-2xl p-5 border border-zinc-700/80 text-left md:text-right shrink-0 flex flex-col justify-between">
+                <div>
+                  <span className="text-xs text-zinc-400 block font-medium">Total com Preços Reais ML</span>
+                  <span className="text-3xl font-black text-emerald-400 font-mono block mt-0.5">
+                    {resultado.total_estimado || "Sob Consulta"}
+                  </span>
+                  <span className="text-[11px] text-zinc-400 mt-1 block">
+                    Preços reais sincronizados do Mercado Livre
+                  </span>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setModalFechamentoAberto(true)}
+                  className="mt-4 px-4 py-2.5 rounded-xl bg-gradient-to-r from-emerald-500 to-emerald-400 hover:from-emerald-400 hover:to-emerald-300 text-zinc-950 font-black text-xs transition shadow-lg hover:shadow-emerald-500/25 flex items-center justify-center gap-2 cursor-pointer transform active:scale-95"
+                  title="Abrir checklist de fechamento de orçamento"
+                >
+                  <ShoppingBag className="w-4 h-4" />
+                  <span>Fechar Orçamento Completo</span>
+                </button>
               </div>
             </div>
 
@@ -585,11 +709,21 @@ Peças:
                     Peças Identificadas e Recomendações
                   </h3>
                   <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
-                    Marcas homologadas com garantia e entrega rápida Mercado Livre Full.
+                    Preços reais consultados em anúncios novos com frete Full no Mercado Livre.
                   </p>
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2.5 self-start sm:self-auto">
+                  <button
+                    type="button"
+                    onClick={() => setModalFechamentoAberto(true)}
+                    className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-zinc-950 text-xs font-black transition shadow-md hover:shadow-lg cursor-pointer transform active:scale-95"
+                    title="Abrir checklist de fechamento de orçamento com opções de WhatsApp"
+                  >
+                    <ShoppingBag className="w-4 h-4" />
+                    <span>Fechar Orçamento ({resultado.itens.length})</span>
+                  </button>
+
                   <button
                     type="button"
                     onClick={handleVerKitCompleto}
@@ -616,10 +750,10 @@ Peças:
                 <table className="w-full text-left border-collapse">
                   <thead>
                     <tr className="border-b border-zinc-200 dark:border-zinc-800 bg-zinc-50/70 dark:bg-zinc-950/70 text-[11px] font-bold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
-                      <th className="py-4 px-6">Peça Solicitada</th>
+                      <th className="py-4 px-6">Peça e Anúncio Encontrado</th>
                       <th className="py-4 px-6 w-48">Marca Recomendada</th>
-                      <th className="py-4 px-6 w-36 text-right">Preço Médio</th>
-                      <th className="py-4 px-6 w-60 text-center">Melhor Oferta Full</th>
+                      <th className="py-4 px-6 w-40 text-right">Preço Real ML</th>
+                      <th className="py-4 px-6 w-52 text-center">Melhor Oferta</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800 text-sm">
@@ -630,7 +764,10 @@ Peças:
                         item.peca_padronizada ||
                         item.nome_peca ||
                         "";
-                      const redirectUrl = `/api/redirect?query=${encodeURIComponent(termoBusca)}`;
+                      const directUrl =
+                        item.link_anuncio ||
+                        item.link_direto_anuncio ||
+                        `/api/redirect?query=${encodeURIComponent(termoBusca)}`;
                       const marcaNome =
                         item.marca_preferencial ||
                         item.marca_recomendada ||
@@ -641,48 +778,71 @@ Peças:
                           key={idx}
                           className="hover:bg-zinc-50/50 dark:hover:bg-zinc-800/40 transition-colors"
                         >
-                          {/* 1. Nome da Peça e Detalhes */}
+                          {/* 1. Nome da Peça, Thumbnail e Detalhes do ML */}
                           <td className="py-4 px-6 align-middle">
-                            <div className="font-bold text-zinc-900 dark:text-zinc-100 leading-snug flex items-center flex-wrap gap-2">
-                              <span>{item.peca_padronizada || item.nome_peca}</span>
-                              {item.quantidade && item.quantidade > 1 ? (
-                                <span className="px-1.5 py-0.5 text-[10px] font-bold rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 border border-zinc-200 dark:border-zinc-700">
-                                  {item.quantidade}x
-                                </span>
+                            <div className="flex items-start gap-3.5">
+                              {item.thumbnail ? (
+                                <div className="w-12 h-12 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white flex items-center justify-center overflow-hidden shrink-0 shadow-xs">
+                                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                                  <img
+                                    src={item.thumbnail}
+                                    alt={item.titulo_anuncio || item.peca_padronizada}
+                                    className="w-full h-full object-contain p-0.5"
+                                  />
+                                </div>
                               ) : null}
-                              {item.posicao && (
-                                <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-blue-50 dark:bg-blue-950/50 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800/60">
-                                  {item.posicao}
-                                </span>
-                              )}
-                            </div>
 
-                            {item.termo_lido && (
-                              <div className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-0.5">
-                                Lido no orçamento: &quot;{item.termo_lido}&quot;
+                              <div className="min-w-0 flex-1">
+                                <div className="font-bold text-zinc-900 dark:text-zinc-100 leading-snug flex items-center flex-wrap gap-2">
+                                  <span>{item.peca_padronizada || item.nome_peca}</span>
+                                  {item.quantidade && item.quantidade > 1 ? (
+                                    <span className="px-1.5 py-0.5 text-[10px] font-bold rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 border border-zinc-200 dark:border-zinc-700">
+                                      {item.quantidade}x
+                                    </span>
+                                  ) : null}
+                                  {item.posicao && (
+                                    <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-blue-50 dark:bg-blue-950/50 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800/60">
+                                      {item.posicao}
+                                    </span>
+                                  )}
+                                  {item.tem_full && (
+                                    <span className="px-1.5 py-0.5 text-[10px] font-bold rounded bg-amber-100 dark:bg-amber-950 text-amber-900 dark:text-amber-300 border border-amber-300 dark:border-amber-800 flex items-center gap-0.5">
+                                      <Zap className="w-3 h-3 fill-amber-500 text-amber-500" />
+                                      <span>Full</span>
+                                    </span>
+                                  )}
+                                </div>
+
+                                {item.titulo_anuncio && item.titulo_anuncio !== item.peca_padronizada && (
+                                  <div className="text-[11px] text-zinc-500 dark:text-zinc-400 line-clamp-1 mt-0.5">
+                                    {item.titulo_anuncio}
+                                  </div>
+                                )}
+
+                                {item.termo_lido && (
+                                  <div className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-0.5">
+                                    Lido no orçamento: &quot;{item.termo_lido}&quot;
+                                  </div>
+                                )}
+
+                                {(item.requer_confirmacao || item.confianca === "baixa" || item.confianca === "media") && (
+                                  <div className="mt-1 flex items-center gap-1.5">
+                                    <span
+                                      className={`inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full border ${
+                                        item.confianca === "baixa" || item.requer_confirmacao
+                                          ? "bg-amber-50 dark:bg-amber-950/50 text-amber-700 dark:text-amber-300 border-amber-300 dark:border-amber-800"
+                                          : "bg-blue-50 dark:bg-blue-950/50 text-blue-700 dark:text-blue-300 border-blue-200 dark:border-blue-800"
+                                      }`}
+                                    >
+                                      <AlertTriangle className="w-3 h-3 text-amber-500 shrink-0" />
+                                      {item.requer_confirmacao
+                                        ? "Requer confirmação com mecânico"
+                                        : `Confiança ${item.confianca}`}
+                                    </span>
+                                  </div>
+                                )}
                               </div>
-                            )}
-
-                            <div className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
-                              Busca: &quot;{termoBusca}&quot;
                             </div>
-
-                            {(item.requer_confirmacao || item.confianca === "baixa" || item.confianca === "media") && (
-                              <div className="mt-1 flex items-center gap-1.5">
-                                <span
-                                  className={`inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full border ${
-                                    item.confianca === "baixa" || item.requer_confirmacao
-                                      ? "bg-amber-50 dark:bg-amber-950/50 text-amber-700 dark:text-amber-300 border-amber-300 dark:border-amber-800"
-                                      : "bg-blue-50 dark:bg-blue-950/50 text-blue-700 dark:text-blue-300 border-blue-200 dark:border-blue-800"
-                                  }`}
-                                >
-                                  <AlertTriangle className="w-3 h-3 text-amber-500 shrink-0" />
-                                  {item.requer_confirmacao
-                                    ? "Requer confirmação com mecânico"
-                                    : `Confiança ${item.confianca}`}
-                                </span>
-                              </div>
-                            )}
                           </td>
 
                           {/* 2. Marca Recomendada */}
@@ -693,29 +853,29 @@ Peças:
                             </span>
                           </td>
 
-                          {/* 3. Preço Real / Estimado */}
+                          {/* 3. Preço Real do Mercado Livre */}
                           <td className="py-4 px-6 align-middle text-right">
-                            <span className="font-mono font-bold text-emerald-600 dark:text-emerald-400 text-sm block">
-                              {item.preco_medio_estimado || item.preco_medio || "Consultar"}
+                            <span className="font-mono font-black text-emerald-600 dark:text-emerald-400 text-sm block">
+                              {item.preco_formatado || item.preco_medio || "Sob Consulta"}
                             </span>
-                            {item.preco_real && (
+                            {item.preco_real_ml ? (
                               <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-700 dark:text-emerald-300 bg-emerald-100 dark:bg-emerald-950/80 px-2 py-0.5 rounded-full border border-emerald-300 dark:border-emerald-800/80 mt-1">
                                 ✓ Preço Real ML
                               </span>
-                            )}
+                            ) : null}
                           </td>
 
-                          {/* 4. Botão Verde Chamativo */}
+                          {/* 4. Botão de Compra / Ver no ML */}
                           <td className="py-4 px-6 align-middle text-center">
                             <a
-                              href={redirectUrl}
+                              href={directUrl}
                               target="_blank"
                               rel="noopener noreferrer"
                               className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 active:bg-emerald-600 text-zinc-950 font-bold text-xs shadow-md hover:shadow-lg transition-all transform active:scale-95 cursor-pointer w-full"
-                              title={`Buscar "${termoBusca}" com envio Full no Mercado Livre`}
+                              title={`Ver "${item.peca_padronizada}" no Mercado Livre`}
                             >
                               <Zap className="w-3.5 h-3.5 fill-zinc-950" />
-                              <span>Comprar com Frete Full ➔</span>
+                              <span>{item.tem_full ? "Ver Anúncio Full ➔" : "Ver no Mercado Livre ➔"}</span>
                             </a>
                           </td>
                         </tr>
@@ -728,7 +888,7 @@ Peças:
               {/* Rodapé da Área de Resultado */}
               <div className="p-6 bg-zinc-50/50 dark:bg-zinc-950/50 border-t border-zinc-200 dark:border-zinc-800 flex flex-col sm:flex-row items-center justify-between gap-4">
                 <div className="text-xs text-zinc-500">
-                  Os valores são estimativas de mercado. Ao clicar, você será direcionado para anúncios oficiais com envio Full.
+                  Preços reais obtidos de anúncios ativos no Mercado Livre.
                 </div>
 
                 <div className="flex flex-wrap items-center gap-3">
@@ -739,10 +899,21 @@ Peças:
                       setTexto("");
                       handleClearImage();
                       setAvisoPopup(false);
+                      setModalFechamentoAberto(false);
                     }}
                     className="px-4 py-2 rounded-xl text-xs font-semibold text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200 dark:hover:bg-zinc-800 transition cursor-pointer"
                   >
                     Fazer Nova Cotação
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setModalFechamentoAberto(true)}
+                    className="px-5 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-zinc-950 text-xs font-black transition shadow-md hover:shadow-lg cursor-pointer flex items-center gap-2 transform active:scale-95"
+                    title="Abrir checklist de fechamento"
+                  >
+                    <ShoppingBag className="w-4 h-4" />
+                    <span>Fechar Orçamento Completo</span>
                   </button>
 
                   <button
@@ -758,8 +929,8 @@ Peças:
                   <button
                     type="button"
                     onClick={handleClick}
-                    className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition shadow-md cursor-pointer flex items-center gap-1.5"
-                    title="Abre abas individuais para cada peça no Mercado Livre com o menor preço e frete Full"
+                    className="px-5 py-2.5 rounded-xl bg-zinc-900 dark:bg-white text-white dark:text-zinc-900 text-xs font-bold transition shadow-md cursor-pointer flex items-center gap-1.5"
+                    title="Abre abas individuais para cada peça no Mercado Livre"
                   >
                     <ExternalLink className="w-3.5 h-3.5" />
                     <span>Abrir todas as peças ({resultado.itens.length}) em abas separadas</span>
@@ -768,6 +939,269 @@ Peças:
               </div>
             </div>
           </section>
+        )}
+
+        {/* =========================================================================
+            MODAL INTERATIVO: FECHAR ORÇAMENTO COMPLETO
+        ========================================================================== */}
+        {modalFechamentoAberto && resultado && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-zinc-950/75 backdrop-blur-sm animate-in fade-in duration-200">
+            <div className="bg-white dark:bg-zinc-900 border-2 border-zinc-200 dark:border-zinc-800 rounded-3xl max-w-3xl w-full shadow-2xl flex flex-col max-h-[90vh] overflow-hidden">
+              {/* Header do Modal */}
+              <div className="p-5 sm:p-6 border-b border-zinc-200 dark:border-zinc-800 flex items-center justify-between gap-4 bg-zinc-50/70 dark:bg-zinc-950/50">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-2xl bg-emerald-500/10 text-emerald-500 border border-emerald-500/20 flex items-center justify-center shrink-0">
+                    <ShoppingBag className="w-5 h-5 text-emerald-500" />
+                  </div>
+                  <div>
+                    <h3 className="text-lg font-black text-zinc-900 dark:text-white flex items-center gap-2">
+                      <span>Fechar Orçamento Completo</span>
+                      <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
+                        Preços Reais ML
+                      </span>
+                    </h3>
+                    <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
+                      {resultado.veiculo
+                        ? [
+                            resultado.veiculo.marca,
+                            resultado.veiculo.modelo,
+                            resultado.veiculo.motorizacao,
+                            resultado.veiculo.ano,
+                          ]
+                            .filter(Boolean)
+                            .join(" ")
+                        : resultado.veiculo_detectado || "Veículo Detectado"}
+                      {resultado.veiculo?.placa ? ` • Placa: ${resultado.veiculo.placa}` : ""}
+                    </p>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setModalFechamentoAberto(false)}
+                  className="p-2 rounded-xl text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition cursor-pointer"
+                  title="Fechar modal"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {/* Barra de Seleção / Contagem */}
+              <div className="px-6 py-3 bg-zinc-100/70 dark:bg-zinc-950/70 border-b border-zinc-200 dark:border-zinc-800 flex items-center justify-between text-xs">
+                <button
+                  type="button"
+                  onClick={handleToggleTodos}
+                  className="font-bold text-zinc-700 dark:text-zinc-300 hover:text-emerald-600 dark:hover:text-emerald-400 flex items-center gap-2 cursor-pointer transition"
+                >
+                  {itensSelecionados.length === resultado.itens.length ? (
+                    <CheckSquare className="w-4 h-4 text-emerald-500" />
+                  ) : (
+                    <Square className="w-4 h-4 text-zinc-400" />
+                  )}
+                  <span>
+                    {itensSelecionados.length === resultado.itens.length
+                      ? "Desmarcar todos os itens"
+                      : "Selecionar todos os itens"}
+                  </span>
+                </button>
+
+                <span className="font-semibold text-zinc-500 dark:text-zinc-400">
+                  <strong className="text-zinc-900 dark:text-white font-mono">{itensSelecionados.length}</strong> de{" "}
+                  <strong className="font-mono">{resultado.itens.length}</strong> peças selecionadas
+                </span>
+              </div>
+
+              {/* Lista Scrollável de Itens com Checkbox, Foto, Título Real e Preço Real */}
+              <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-3">
+                {resultado.itens.map((item, idx) => {
+                  const isChecked = itensSelecionados.includes(idx);
+                  const termoBusca =
+                    item.termo_busca_mercadolivre ||
+                    item.query_busca ||
+                    item.peca_padronizada ||
+                    item.nome_peca ||
+                    "";
+                  const directLink =
+                    item.link_anuncio ||
+                    item.link_direto_anuncio ||
+                    `/api/redirect?query=${encodeURIComponent(termoBusca)}`;
+
+                  return (
+                    <div
+                      key={idx}
+                      className={`p-3.5 sm:p-4 rounded-2xl border transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-3.5 ${
+                        isChecked
+                          ? "bg-white dark:bg-zinc-800/70 border-emerald-500/40 shadow-sm"
+                          : "bg-zinc-50/50 dark:bg-zinc-950/40 border-zinc-200 dark:border-zinc-800 opacity-60"
+                      }`}
+                    >
+                      {/* Checkbox + Thumbnail + Detalhes */}
+                      <div className="flex items-start gap-3.5 flex-1 min-w-0">
+                        <label className="flex items-center cursor-pointer pt-1 sm:pt-0 shrink-0">
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            onChange={() => handleToggleItem(idx)}
+                            className="w-5 h-5 rounded-md border-zinc-300 text-emerald-600 focus:ring-emerald-500 cursor-pointer accent-emerald-500"
+                          />
+                        </label>
+
+                        {/* Thumbnail do Mercado Livre */}
+                        <div className="w-14 h-14 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white flex items-center justify-center overflow-hidden shrink-0 shadow-xs">
+                          {item.thumbnail ? (
+                            // eslint-disable-next-line @next/next/no-img-element
+                            <img
+                              src={item.thumbnail}
+                              alt={item.titulo_anuncio || item.peca_padronizada}
+                              className="w-full h-full object-contain p-1"
+                            />
+                          ) : (
+                            <Package className="w-6 h-6 text-zinc-300" />
+                          )}
+                        </div>
+
+                        {/* Textos e Tags */}
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center flex-wrap gap-1.5">
+                            <span className="font-bold text-sm text-zinc-900 dark:text-white leading-tight">
+                              {item.peca_padronizada || item.nome_peca}
+                            </span>
+                            {item.quantidade && item.quantidade > 1 ? (
+                              <span className="px-1.5 py-0.2 rounded text-[10px] font-bold bg-zinc-200 dark:bg-zinc-700 text-zinc-800 dark:text-zinc-200">
+                                {item.quantidade}x
+                              </span>
+                            ) : null}
+                            {item.posicao && (
+                              <span className="px-1.5 py-0.2 rounded text-[10px] font-semibold bg-blue-50 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300 border border-blue-200/80 dark:border-blue-800/80">
+                                {item.posicao}
+                              </span>
+                            )}
+                            {item.tem_full && (
+                              <span className="px-1.5 py-0.2 rounded text-[10px] font-bold bg-amber-100 dark:bg-amber-950 text-amber-900 dark:text-amber-300 border border-amber-300 dark:border-amber-800 flex items-center gap-0.5">
+                                <Zap className="w-3 h-3 fill-amber-500 text-amber-500" />
+                                <span>Full</span>
+                              </span>
+                            )}
+                          </div>
+
+                          {/* Título real do anúncio encontrado no Mercado Livre */}
+                          {item.titulo_anuncio && (
+                            <p className="text-xs text-zinc-500 dark:text-zinc-400 truncate mt-1">
+                              {item.titulo_anuncio}
+                            </p>
+                          )}
+
+                          <div className="text-[11px] text-zinc-400 mt-0.5 flex items-center gap-2">
+                            <span>
+                              Marca:{" "}
+                              <strong className="text-zinc-700 dark:text-zinc-300 font-medium">
+                                {item.marca_preferencial || item.marca_recomendada || "Homologada"}
+                              </strong>
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Preço e Botão Individual Comprar / Ver no ML */}
+                      <div className="flex sm:flex-col items-center sm:items-end justify-between sm:justify-center gap-2 pl-8 sm:pl-0 shrink-0">
+                        <div className="text-right">
+                          <span className="text-base font-black font-mono text-emerald-600 dark:text-emerald-400 block leading-tight">
+                            {item.preco_formatado ||
+                              (item.preco_real_ml
+                                ? item.preco_real_ml.toLocaleString("pt-BR", {
+                                    style: "currency",
+                                    currency: "BRL",
+                                  })
+                                : "Sob Consulta")}
+                          </span>
+                          {item.quantidade && item.quantidade > 1 && item.preco_real_ml ? (
+                            <span className="text-[10px] text-zinc-400 block">
+                              Total:{" "}
+                              {(item.preco_real_ml * item.quantidade).toLocaleString("pt-BR", {
+                                style: "currency",
+                                currency: "BRL",
+                              })}
+                            </span>
+                          ) : null}
+                        </div>
+
+                        <a
+                          href={directLink}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-zinc-100 dark:bg-zinc-800 hover:bg-emerald-500 hover:text-zinc-950 text-zinc-700 dark:text-zinc-300 text-xs font-bold transition shadow-xs cursor-pointer group"
+                          title="Abrir este produto diretamente no Mercado Livre"
+                        >
+                          <span>Ver no ML</span>
+                          <ExternalLink className="w-3 h-3 group-hover:translate-x-0.5 transition-transform" />
+                        </a>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Footer Sticky com Recálculo Dinâmico e Ferramentas */}
+              <div className="p-5 sm:p-6 bg-zinc-50 dark:bg-zinc-950 border-t border-zinc-200 dark:border-zinc-800 space-y-4">
+                {/* Total Recalculado */}
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white dark:bg-zinc-900 p-4 rounded-2xl border border-zinc-200 dark:border-zinc-800 shadow-xs">
+                  <div>
+                    <span className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 block">
+                      Total Selecionado ({itensSelecionados.length} peças)
+                    </span>
+                    <span className="text-xs text-zinc-400">
+                      Preços reais sincronizados diretamente do Mercado Livre
+                    </span>
+                  </div>
+                  <div className="text-left sm:text-right">
+                    <span className="text-2xl sm:text-3xl font-black text-emerald-500 font-mono block leading-tight">
+                      {totalFormatado}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Feedback de Cópia */}
+                {copiadoFeedback && (
+                  <div className="p-2.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-200 dark:border-emerald-800 text-xs font-semibold text-emerald-700 dark:text-emerald-300 flex items-center justify-center gap-2 animate-in fade-in duration-200">
+                    <Check className="w-4 h-4 text-emerald-500" />
+                    <span>Lista de peças e orçamento copiada com sucesso! Pronto para colar.</span>
+                  </div>
+                )}
+
+                {/* Ações: Cotar WhatsApp + Copiar Lista */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <button
+                    type="button"
+                    onClick={handleEnviarWhatsApp}
+                    className="w-full py-3.5 px-4 rounded-xl bg-[#25D366] hover:bg-[#20ba5a] text-zinc-950 font-black text-xs sm:text-sm flex items-center justify-center gap-2 shadow-md hover:shadow-lg transition cursor-pointer transform active:scale-95"
+                    title="Enviar orçamento com as peças selecionadas no WhatsApp"
+                  >
+                    <MessageSquare className="w-4 h-4 text-zinc-950 fill-zinc-950" />
+                    <span>Cotar via WhatsApp</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleCopiarLista}
+                    className="w-full py-3.5 px-4 rounded-xl bg-zinc-900 dark:bg-white text-white dark:text-zinc-900 hover:opacity-90 font-bold text-xs sm:text-sm flex items-center justify-center gap-2 shadow-md transition cursor-pointer transform active:scale-95"
+                    title="Copiar lista formatada para a área de transferência"
+                  >
+                    {copiadoFeedback ? (
+                      <>
+                        <Check className="w-4 h-4 text-emerald-500" />
+                        <span>Lista Copiada!</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-4 h-4" />
+                        <span>Copiar Lista para Orçamento</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
         )}
 
         {/* Modal de Aviso e Abertura Rápida caso o navegador bloqueie múltiplas abas */}

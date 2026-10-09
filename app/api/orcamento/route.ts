@@ -21,7 +21,15 @@ export interface ItemOrcamento {
   confianca: "alta" | "media" | "baixa";
   requer_confirmacao: boolean;
 
-  // Campos de enriquecimento de preços e compatibilidade
+  // Preço REAL do Mercado Livre (nunca estimado por IA)
+  preco_real_ml?: number | null;
+  preco_formatado?: string | null;
+  titulo_anuncio?: string | null;
+  link_anuncio?: string | null;
+  tem_full?: boolean;
+  thumbnail?: string | null;
+
+  // Campos legados para compatibilidade
   preco_medio_estimado?: string;
   preco_medio?: string;
   link_direto_anuncio?: string | null;
@@ -55,7 +63,7 @@ Diretrizes Críticas:
    - Gere no campo "termo_busca_mercadolivre" uma query de busca enxuta e cirúrgica, combinando apenas: [Nome Padronizado] + [Modelo] + [Motor/Ano] + [Posição/Lado se houver]. Não inclua stop-words nem frases compridas.
 
 4. SAÍDA OBRIGATÓRIA:
-   - Retorne exclusivamente o objeto JSON validado conforme o schema fornecido. Não inclua texto introdutório, explicações ou blocos markdown adicionais.`;
+   - Retorne exclusivamente o objeto JSON validado conforme o schema fornecido. Não inclua estimativas de preços ou textos adicionais.`;
 
 const RESPONSE_SCHEMA = {
   type: "OBJECT",
@@ -103,19 +111,67 @@ const RESPONSE_SCHEMA = {
   required: ["veiculo", "itens"],
 };
 
-interface PrecoRealML {
-  preco: string;
-  link?: string | null;
+export interface OfertaRealML {
+  preco: number;
+  preco_formatado: string;
+  titulo: string;
+  link: string;
+  tem_full: boolean;
+  thumbnail: string | null;
 }
 
 /**
- * Consulta o preço real e atualizado de um anúncio diretamente no Mercado Livre
+ * Consulta o preço real e atualizado diretamente de anúncios confiáveis e novos do Mercado Livre
  */
-async function buscarPrecoRealML(query_busca: string): Promise<PrecoRealML | null> {
-  if (!query_busca || !query_busca.trim()) return null;
+async function buscarPrecoMercadoLivre(termoBusca: string): Promise<OfertaRealML | null> {
+  if (!termoBusca || !termoBusca.trim()) return null;
 
+  // 1. Tenta a API direta do Mercado Livre Brasil (MLB) filtrando por itens novos (2230284)
   try {
-    const slug = query_busca
+    const url = `https://api.mercadolibre.com/sites/MLB/search?q=${encodeURIComponent(termoBusca)}&condition=2230284&limit=5`;
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        Accept: "application/json",
+      },
+      signal: AbortSignal.timeout(4500),
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      const anunciosValidos = (data.results || []).filter(
+        (item: { price?: number }) => item.price && item.price > 5
+      );
+
+      // Prioriza produtos com frete Full ou lojas confiáveis
+      const melhorOferta =
+        anunciosValidos.find(
+          (item: { shipping?: { logistic_type?: string } }) =>
+            item.shipping?.logistic_type === "fulfillment"
+        ) || anunciosValidos[0];
+
+      if (melhorOferta) {
+        const precoNum = Number(melhorOferta.price);
+        return {
+          preco: precoNum,
+          preco_formatado: precoNum.toLocaleString("pt-BR", {
+            style: "currency",
+            currency: "BRL",
+          }),
+          titulo: melhorOferta.title,
+          link: melhorOferta.permalink,
+          tem_full: melhorOferta.shipping?.logistic_type === "fulfillment",
+          thumbnail: melhorOferta.thumbnail || null,
+        };
+      }
+    }
+  } catch (error) {
+    console.warn("Aviso na chamada direta da API do ML, tentando busca segura:", error);
+  }
+
+  // 2. Fallback de busca segura estruturada (quando a API retornar 403 por IP/Vercel)
+  try {
+    const slug = termoBusca
       .normalize("NFD")
       .replace(/[\u0300-\u036f]/g, "")
       .replace(/[^a-zA-Z0-9\s]/g, " ")
@@ -123,84 +179,71 @@ async function buscarPrecoRealML(query_busca: string): Promise<PrecoRealML | nul
       .replace(/\s+/g, "-")
       .toLowerCase();
 
-    const url = `https://lista.mercadolivre.com.br/${encodeURIComponent(slug)}_OrderId_PRICE_ASC`;
-
-    const headersList = [
-      {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        Accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
-      },
-      {
+    const searchUrl = `https://lista.mercadolivre.com.br/${encodeURIComponent(slug)}_OrderId_PRICE_ASC`;
+    const res = await fetch(searchUrl, {
+      headers: {
         "User-Agent":
           "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
-        Accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "pt-BR,pt;q=0.9",
       },
-    ];
+      signal: AbortSignal.timeout(5000),
+    });
 
-    let html = "";
+    if (res.ok) {
+      const html = await res.text();
+      const cardMatch =
+        html.match(/<div[^>]*class="[^"]*poly-card[^"]*"[^>]*>([\s\S]*?)<\/div>\s*<\/div>/) ||
+        html.match(/<li[^>]*class="[^"]*ui-search-layout__item[^"]*"[^>]*>([\s\S]*?)<\/li>/);
 
-    for (const headers of headersList) {
-      try {
-        const res = await fetch(url, {
-          headers,
-          signal: AbortSignal.timeout(5000),
-          redirect: "follow",
-        });
+      const context = cardMatch ? cardMatch[0] : html;
 
-        if (res.ok) {
-          const body = await res.text();
-          if (!body.includes("suspicious_traffic") && !res.url.includes("account-verification")) {
-            html = body;
-            break;
-          }
-        }
-      } catch {
-        // Tenta o próximo header se houver timeout
+      const pMatch = context.match(/class="[^"]*andes-money-amount__fraction[^"]*"[^>]*>([0-9.]+)</);
+      const cMatch = context.match(/class="[^"]*andes-money-amount__cents[^"]*"[^>]*>([0-9]+)</);
+
+      if (pMatch) {
+        const fracao = pMatch[1];
+        const centavos = cMatch ? cMatch[1] : "00";
+        const valorNumerico =
+          parseFloat(fracao.replace(/\./g, "")) + parseFloat(centavos) / 100;
+
+        const titleMatch =
+          context.match(
+            /class="[^"]*poly-component__title[^"]*"[^>]*><a[^>]*>([^<]+)<\/a>/
+          ) ||
+          context.match(/class="[^"]*ui-search-item__title[^"]*"[^>]*>([^<]+)</) ||
+          context.match(/<h2[^>]*>([^<]+)<\/h2>/);
+
+        const linkMatch = context.match(
+          /href="(https:\/\/[^"]*(?:produto\.mercadolivre\.com\.br\/|mercadolivre\.com\.br\/[^\/]+\/up\/|mercadolivre\.com\.br\/p\/MLB)[^"]*)"/
+        );
+
+        const thumbMatch = context.match(
+          /(?:src|data-src)="(https:\/\/[^"]*(?:http2\.mlstatic\.com\/D_[^"]*))"/
+        );
+
+        const temFull =
+          context.includes("poly-component__fulfillment") ||
+          context.includes("ui-search-item__fulfillment") ||
+          context.includes("Full");
+
+        const cleanLink = linkMatch ? linkMatch[1].split("#")[0].split("?")[0] : null;
+
+        return {
+          preco: valorNumerico,
+          preco_formatado: `R$ ${fracao},${centavos}`,
+          titulo: titleMatch ? titleMatch[1].trim() : termoBusca,
+          link: cleanLink || `https://lista.mercadolivre.com.br/${encodeURIComponent(slug)}`,
+          tem_full: temFull,
+          thumbnail: thumbMatch ? thumbMatch[1] : null,
+        };
       }
     }
-
-    if (!html) return null;
-
-    const firstResult =
-      html.match(/<li[^>]*class="[^"]*ui-search-layout__item[^"]*"[^>]*>([\s\S]*?)<\/li>/) ||
-      html.match(/<div[^>]*class="[^"]*(?:ui-search-result__wrapper|poly-card)[^"]*"[^>]*>([\s\S]*?)<\/div>\s*<\/div>/);
-
-    const context = firstResult ? firstResult[1] : html;
-
-    const secondLine = context.match(/class="[^"]*ui-search-price__second-line[^"]*"[^>]*>([\s\S]*?)<\/div>/);
-    const priceBlock = secondLine ? secondLine[1] : context;
-
-    const pMatch =
-      priceBlock.match(/class="[^"]*andes-money-amount__fraction[^"]*"[^>]*>([0-9.]+)</) ||
-      context.match(/andes-money-amount__fraction[^>]*>([0-9.]+)</);
-
-    if (!pMatch) return null;
-
-    const cMatch =
-      priceBlock.match(/class="[^"]*andes-money-amount__cents[^"]*"[^>]*>([0-9]+)</) ||
-      context.match(/andes-money-amount__cents[^>]*>([0-9]+)</);
-
-    const linkMatch = context.match(
-      /href="(https:\/\/[^"]*(?:produto\.mercadolivre\.com\.br\/|mercadolivre\.com\.br\/)[^"]*)"/
-    );
-
-    const fracao = pMatch[1];
-    const centavos = cMatch ? cMatch[1] : "00";
-    const link = linkMatch ? linkMatch[1].split("?")[0].split("#")[0] : null;
-
-    return {
-      preco: `R$ ${fracao},${centavos}`,
-      link,
-    };
-  } catch (err) {
-    console.warn(`Erro ao buscar preço real no ML para "${query_busca}":`, err);
-    return null;
+  } catch (error) {
+    console.error("Erro no fallback de busca do ML:", error);
   }
+
+  return null;
 }
 
 /**
@@ -214,16 +257,23 @@ async function sincronizarPrecosReais(orcamento: OrcamentoResposta): Promise<Orc
       // Normalização de campos de compatibilidade
       if (!item.nome_peca) item.nome_peca = item.peca_padronizada;
       if (!item.query_busca) item.query_busca = item.termo_busca_mercadolivre;
-      if (!item.marca_recomendada) item.marca_recomendada = item.marca_preferencial || "Original / Homologada";
+      if (!item.marca_recomendada)
+        item.marca_recomendada = item.marca_preferencial || "Original / Homologada";
 
-      const termoBusca = item.termo_busca_mercadolivre || item.query_busca || item.peca_padronizada;
-      const precoReal = await buscarPrecoRealML(termoBusca);
-      if (precoReal) {
-        item.preco_medio = precoReal.preco;
-        item.preco_medio_estimado = precoReal.preco;
-        if (precoReal.link) {
-          item.link_direto_anuncio = precoReal.link;
-        }
+      const termoBusca =
+        item.termo_busca_mercadolivre || item.query_busca || item.peca_padronizada;
+      const oferta = await buscarPrecoMercadoLivre(termoBusca);
+
+      if (oferta) {
+        item.preco_real_ml = oferta.preco;
+        item.preco_formatado = oferta.preco_formatado;
+        item.preco_medio = oferta.preco_formatado;
+        item.preco_medio_estimado = oferta.preco_formatado;
+        item.titulo_anuncio = oferta.titulo;
+        item.link_anuncio = oferta.link;
+        item.link_direto_anuncio = oferta.link;
+        item.tem_full = oferta.tem_full;
+        item.thumbnail = oferta.thumbnail;
         item.preco_real = true;
       }
     })
@@ -236,15 +286,11 @@ async function sincronizarPrecosReais(orcamento: OrcamentoResposta): Promise<Orc
     orcamento.veiculo_detectado = partes.length > 0 ? partes.join(" ") : "Veículo Detectado";
   }
 
-  // Recalcula o total_estimado somando os preços reais extraídos
+  // Recalcula o total_estimado somando estritamente os PREÇOS REAIS encontrados
   let totalNum = 0;
   for (const it of orcamento.itens) {
-    const precoStr = it.preco_medio_estimado || it.preco_medio || "0";
-    const num = parseFloat(
-      precoStr.replace("R$", "").replace(/\./g, "").replace(",", ".").trim()
-    );
-    if (!isNaN(num)) {
-      totalNum += num * (it.quantidade || 1);
+    if (it.preco_real_ml && it.preco_real_ml > 0) {
+      totalNum += it.preco_real_ml * (it.quantidade || 1);
     }
   }
 
@@ -253,6 +299,8 @@ async function sincronizarPrecosReais(orcamento: OrcamentoResposta): Promise<Orc
       style: "currency",
       currency: "BRL",
     });
+  } else {
+    orcamento.total_estimado = "Sob Consulta";
   }
 
   return orcamento;
@@ -331,7 +379,6 @@ function extrairFallbackInteligente(texto: string): OrcamentoResposta {
       termo_busca_mercadolivre: `Amortecedor Dianteiro ${modelo} ${ano || ""} Par`.trim(),
       confianca: "alta",
       requer_confirmacao: false,
-      preco_medio_estimado: "R$ 480,00",
     });
   }
 
@@ -345,7 +392,6 @@ function extrairFallbackInteligente(texto: string): OrcamentoResposta {
       termo_busca_mercadolivre: `Jogo Pastilha Freio ${modelo} Dianteira`.trim(),
       confianca: "alta",
       requer_confirmacao: false,
-      preco_medio_estimado: "R$ 89,90",
     });
   }
 
@@ -359,7 +405,6 @@ function extrairFallbackInteligente(texto: string): OrcamentoResposta {
       termo_busca_mercadolivre: `Par Disco Freio Ventilado ${modelo}`.trim(),
       confianca: "alta",
       requer_confirmacao: false,
-      preco_medio_estimado: "R$ 210,00",
     });
   }
 
@@ -373,7 +418,6 @@ function extrairFallbackInteligente(texto: string): OrcamentoResposta {
       termo_busca_mercadolivre: `Kit Embreagem ${modelo} LuK`.trim(),
       confianca: "alta",
       requer_confirmacao: false,
-      preco_medio_estimado: "R$ 440,00",
     });
   }
 
@@ -387,7 +431,6 @@ function extrairFallbackInteligente(texto: string): OrcamentoResposta {
       termo_busca_mercadolivre: `Jogo Velas Ignicao ${modelo} NGK`.trim(),
       confianca: "alta",
       requer_confirmacao: false,
-      preco_medio_estimado: "R$ 95,00",
     });
   }
 
@@ -401,7 +444,6 @@ function extrairFallbackInteligente(texto: string): OrcamentoResposta {
       termo_busca_mercadolivre: `Kit Correia Dentada Tensor ${modelo}`.trim(),
       confianca: "alta",
       requer_confirmacao: false,
-      preco_medio_estimado: "R$ 160,00",
     });
   }
 
@@ -415,7 +457,6 @@ function extrairFallbackInteligente(texto: string): OrcamentoResposta {
       termo_busca_mercadolivre: `Filtro Oleo ${modelo} Mann`.trim(),
       confianca: "alta",
       requer_confirmacao: false,
-      preco_medio_estimado: "R$ 42,00",
     });
   }
 
@@ -429,16 +470,7 @@ function extrairFallbackInteligente(texto: string): OrcamentoResposta {
       termo_busca_mercadolivre: `Pecas ${termoCarro}`.trim(),
       confianca: "media",
       requer_confirmacao: true,
-      preco_medio_estimado: "R$ 250,00",
     });
-  }
-
-  let totalNum = 0;
-  for (const it of itens) {
-    const num = parseFloat(
-      (it.preco_medio_estimado || "0").replace("R$", "").replace(/\./g, "").replace(",", ".").trim()
-    );
-    if (!isNaN(num)) totalNum += num;
   }
 
   const veiculoNome = [marca, modelo, motorizacao, ano].filter(Boolean).join(" ");
@@ -454,7 +486,7 @@ function extrairFallbackInteligente(texto: string): OrcamentoResposta {
     itens,
     observacoes_gerais: "Resultado gerado pelo motor de inferência local.",
     veiculo_detectado: veiculoNome,
-    total_estimado: totalNum.toLocaleString("pt-BR", { style: "currency", currency: "BRL" }),
+    total_estimado: "Sob Consulta",
   };
 }
 
