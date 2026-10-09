@@ -10,6 +10,8 @@ import {
   Car,
   CheckCircle2,
   AlertCircle,
+  AlertTriangle,
+  Info,
   ExternalLink,
   RefreshCw,
   Zap,
@@ -22,19 +24,39 @@ import {
 } from "lucide-react";
 
 interface ItemOrcamento {
-  nome_peca: string;
-  marca_recomendada: string;
-  query_busca: string;
-  preco_medio_estimado: string;
+  termo_lido?: string;
+  peca_padronizada: string;
+  quantidade?: number;
+  posicao?: string | null;
+  marca_preferencial?: string | null;
+  termo_busca_mercadolivre?: string;
+  confianca?: "alta" | "media" | "baixa";
+  requer_confirmacao?: boolean;
+  // Campos de enriquecimento de preço
+  preco_medio_estimado?: string;
   preco_medio?: string;
   link_direto_anuncio?: string | null;
   preco_real?: boolean;
+  // Campos legados para compatibilidade
+  nome_peca?: string;
+  marca_recomendada?: string;
+  query_busca?: string;
+}
+
+interface VeiculoOrcamento {
+  marca: string | null;
+  modelo: string | null;
+  ano: string | null;
+  motorizacao?: string | null;
+  placa?: string | null;
 }
 
 interface OrcamentoResultado {
-  veiculo_detectado: string;
+  veiculo?: VeiculoOrcamento;
   itens: ItemOrcamento[];
-  total_estimado: string;
+  observacoes_gerais?: string | null;
+  veiculo_detectado?: string;
+  total_estimado?: string;
 }
 
 const EXEMPLOS_PRONTOS = [
@@ -151,7 +173,13 @@ export default function OrcamentoPage() {
     if (!resultado?.itens || resultado.itens.length === 0) return;
 
     resultado.itens.forEach((item, index) => {
-      const url = `/api/redirect?query=${encodeURIComponent(item.query_busca)}`;
+      const termo =
+        item.termo_busca_mercadolivre ||
+        item.query_busca ||
+        item.peca_padronizada ||
+        item.nome_peca ||
+        "";
+      const url = `/api/redirect?query=${encodeURIComponent(termo)}`;
       if (index === 0) {
         window.open(url, "_blank");
       } else {
@@ -423,19 +451,42 @@ Peças:
                   <CheckCircle2 className="w-3.5 h-3.5" />
                   Veículo Identificado com IA
                 </div>
-                <h2 className="text-2xl sm:text-3xl font-black tracking-tight flex items-center gap-3">
+                <h2 className="text-2xl sm:text-3xl font-black tracking-tight flex items-center flex-wrap gap-3">
                   <Car className="w-7 h-7 text-amber-400 shrink-0" />
-                  <span>{resultado.veiculo_detectado}</span>
+                  <span>
+                    {resultado.veiculo
+                      ? [
+                          resultado.veiculo.marca,
+                          resultado.veiculo.modelo,
+                          resultado.veiculo.motorizacao,
+                          resultado.veiculo.ano,
+                        ]
+                          .filter(Boolean)
+                          .join(" ") || "Veículo não especificado"
+                      : resultado.veiculo_detectado || "Veículo Detectado"}
+                  </span>
+                  {resultado.veiculo?.placa && (
+                    <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-lg text-xs font-mono font-bold bg-zinc-800 text-amber-300 border border-zinc-700">
+                      Placa: {resultado.veiculo.placa}
+                    </span>
+                  )}
                 </h2>
                 <p className="text-xs sm:text-sm text-zinc-400">
                   Detectamos <strong>{resultado.itens.length}</strong> peças no orçamento fornecido.
                 </p>
+
+                {resultado.observacoes_gerais && (
+                  <div className="p-3 rounded-xl bg-zinc-800/80 border border-zinc-700/80 text-xs text-zinc-300 flex items-start gap-2 mt-2">
+                    <Info className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                    <span>{resultado.observacoes_gerais}</span>
+                  </div>
+                )}
               </div>
 
               <div className="bg-zinc-800/80 backdrop-blur rounded-2xl p-5 border border-zinc-700/80 text-left md:text-right shrink-0">
                 <span className="text-xs text-zinc-400 block font-medium">Total Médio Estimado</span>
                 <span className="text-3xl font-black text-emerald-400 font-mono block mt-0.5">
-                  {resultado.total_estimado}
+                  {resultado.total_estimado || "Sob Consulta"}
                 </span>
                 <span className="text-[11px] text-zinc-400 mt-1 block">
                   Economize comprando direto no Mercado Livre
@@ -478,37 +529,79 @@ Peças:
                   </thead>
                   <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800 text-sm">
                     {resultado.itens.map((item, idx) => {
-                      const redirectUrl = `/api/redirect?query=${encodeURIComponent(
-                        item.query_busca
-                      )}`;
+                      const termoBusca =
+                        item.termo_busca_mercadolivre ||
+                        item.query_busca ||
+                        item.peca_padronizada ||
+                        item.nome_peca ||
+                        "";
+                      const redirectUrl = `/api/redirect?query=${encodeURIComponent(termoBusca)}`;
+                      const marcaNome =
+                        item.marca_preferencial ||
+                        item.marca_recomendada ||
+                        "Original / Homologada";
 
                       return (
                         <tr
                           key={idx}
                           className="hover:bg-zinc-50/50 dark:hover:bg-zinc-800/40 transition-colors"
                         >
-                          {/* 1. Nome da Peça */}
+                          {/* 1. Nome da Peça e Detalhes */}
                           <td className="py-4 px-6 align-middle">
-                            <div className="font-bold text-zinc-900 dark:text-zinc-100 leading-snug">
-                              {item.nome_peca}
+                            <div className="font-bold text-zinc-900 dark:text-zinc-100 leading-snug flex items-center flex-wrap gap-2">
+                              <span>{item.peca_padronizada || item.nome_peca}</span>
+                              {item.quantidade && item.quantidade > 1 ? (
+                                <span className="px-1.5 py-0.5 text-[10px] font-bold rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 border border-zinc-200 dark:border-zinc-700">
+                                  {item.quantidade}x
+                                </span>
+                              ) : null}
+                              {item.posicao && (
+                                <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-blue-50 dark:bg-blue-950/50 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800/60">
+                                  {item.posicao}
+                                </span>
+                              )}
                             </div>
+
+                            {item.termo_lido && (
+                              <div className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-0.5">
+                                Lido no orçamento: &quot;{item.termo_lido}&quot;
+                              </div>
+                            )}
+
                             <div className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
-                              Busca: &quot;{item.query_busca}&quot;
+                              Busca: &quot;{termoBusca}&quot;
                             </div>
+
+                            {(item.requer_confirmacao || item.confianca === "baixa" || item.confianca === "media") && (
+                              <div className="mt-1 flex items-center gap-1.5">
+                                <span
+                                  className={`inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full border ${
+                                    item.confianca === "baixa" || item.requer_confirmacao
+                                      ? "bg-amber-50 dark:bg-amber-950/50 text-amber-700 dark:text-amber-300 border-amber-300 dark:border-amber-800"
+                                      : "bg-blue-50 dark:bg-blue-950/50 text-blue-700 dark:text-blue-300 border-blue-200 dark:border-blue-800"
+                                  }`}
+                                >
+                                  <AlertTriangle className="w-3 h-3 text-amber-500 shrink-0" />
+                                  {item.requer_confirmacao
+                                    ? "Requer confirmação com mecânico"
+                                    : `Confiança ${item.confianca}`}
+                                </span>
+                              </div>
+                            )}
                           </td>
 
                           {/* 2. Marca Recomendada */}
                           <td className="py-4 px-6 align-middle">
                             <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-bold bg-amber-50 dark:bg-amber-950/40 text-amber-900 dark:text-amber-300 border border-amber-200 dark:border-amber-800">
                               <ShieldCheck className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
-                              {item.marca_recomendada}
+                              {marcaNome}
                             </span>
                           </td>
 
                           {/* 3. Preço Real / Estimado */}
                           <td className="py-4 px-6 align-middle text-right">
                             <span className="font-mono font-bold text-emerald-600 dark:text-emerald-400 text-sm block">
-                              {item.preco_medio_estimado || item.preco_medio}
+                              {item.preco_medio_estimado || item.preco_medio || "Consultar"}
                             </span>
                             {item.preco_real && (
                               <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-700 dark:text-emerald-300 bg-emerald-100 dark:bg-emerald-950/80 px-2 py-0.5 rounded-full border border-emerald-300 dark:border-emerald-800/80 mt-1">
@@ -520,11 +613,11 @@ Peças:
                           {/* 4. Botão Verde Chamativo */}
                           <td className="py-4 px-6 align-middle text-center">
                             <a
-                              href={`/api/redirect?query=${encodeURIComponent(item.query_busca)}`}
+                              href={redirectUrl}
                               target="_blank"
                               rel="noopener noreferrer"
                               className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 active:bg-emerald-600 text-zinc-950 font-bold text-xs shadow-md hover:shadow-lg transition-all transform active:scale-95 cursor-pointer w-full"
-                              title={`Buscar "${item.query_busca}" com envio Full no Mercado Livre`}
+                              title={`Buscar "${termoBusca}" com envio Full no Mercado Livre`}
                             >
                               <Zap className="w-3.5 h-3.5 fill-zinc-950" />
                               <span>Comprar com Frete Full ➔</span>

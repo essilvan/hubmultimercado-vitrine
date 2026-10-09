@@ -3,56 +3,105 @@ import { NextRequest, NextResponse } from "next/server";
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
-interface ItemOrcamento {
-  nome_peca: string;
-  marca_recomendada: string;
-  query_busca: string;
-  preco_medio_estimado: string;
+export interface VeiculoOrcamento {
+  marca: string | null;
+  modelo: string | null;
+  ano: string | null;
+  motorizacao: string | null;
+  placa: string | null;
+}
+
+export interface ItemOrcamento {
+  termo_lido: string;
+  peca_padronizada: string;
+  quantidade: number;
+  posicao: string | null;
+  marca_preferencial: string | null;
+  termo_busca_mercadolivre: string;
+  confianca: "alta" | "media" | "baixa";
+  requer_confirmacao: boolean;
+
+  // Campos de enriquecimento de preços e compatibilidade
+  preco_medio_estimado?: string;
   preco_medio?: string;
   link_direto_anuncio?: string | null;
   preco_real?: boolean;
+  nome_peca?: string;
+  marca_recomendada?: string;
+  query_busca?: string;
 }
 
-interface OrcamentoResposta {
-  veiculo_detectado: string;
+export interface OrcamentoResposta {
+  veiculo: VeiculoOrcamento;
   itens: ItemOrcamento[];
-  total_estimado: string;
+  observacoes_gerais?: string | null;
+  veiculo_detectado?: string;
+  total_estimado?: string;
 }
 
-const SYSTEM_PROMPT = `Você é um especialista sênior em autopeças e mecânica automotiva brasileira.
-Analise com extrema precisão o texto ou a foto do orçamento mecânico enviado pelo cliente.
-Identifique o veículo (marca, modelo, motorização e ano). Se algum dado não estiver explícito, deduza pelo contexto com base na frota brasileira.
-Extraia cada peça ou componente de reposição solicitado. Ignore serviços de mão de obra pura (ex: "alinhamento e balanceamento", "troca de óleo mão de obra"), focando nas PEÇAS físicas.
+const SYSTEM_INSTRUCTION = `Você é um especialista sênior em catálogo técnico de autopeças e balconista experiente no mercado de reposição brasileiro (aftermarket). Sua única função é transcrever, higienizar e estruturar orçamentos mecânicos (manuscritos ou digitados) a partir de imagens ou texto.
 
-Para cada peça identificada, determine:
-- nome_peca: Nome técnico claro e comercial (ex: "Amortecedor Dianteiro (Par)", "Kit de Embreagem", "Jogo de Pastilhas de Freio Dianteiro", "Jogo de Velas de Ignição")
-- marca_recomendada: Marca confiável e líder de reposição original (ex: Nakata, Monroe, LuK, Sachs, Cobreq, Fras-le, Fremax, NGK, Bosch, Contitech, Mann-Filter, Cofap, TRW, Valeo, Magneti Marelli, Delphi)
-- query_busca: Termo de busca enxuto e cirúrgico para o Mercado Livre.
-  REGRAS OBRIGATÓRIAS PARA A QUERY_BUSCA:
-  * NUNCA inclua barras de motorização (ex: NUNCA usar "1.0 / 1.4", "1.6 / 2.0"). Use apenas o modelo e opcionalmente o ano (ex: "onix 2016", "gol g5", "hb20").
-  * NUNCA inclua caracteres especiais como "/", "(", ")", ",", ".".
-  * Estrutura obrigatória: [nome da peça] [marca] [modelo do carro] [ano opcional].
-  * Exemplo de amortecedor: em vez de "amortecedor dianteiro nakata chevrolet onix 1.0 / 1.4", gerar "amortecedor dianteiro nakata onix par" ou "amortecedor dianteiro nakata onix 2016 par".
-  * Exemplo de pastilha: gerar "pastilha freio dianteira cobreq onix" ou "pastilha freio dianteira cobreq onix 2016".
-  * Exemplo de embreagem: gerar "kit embreagem luk hb20".
-  * Exemplo de velas: gerar "jogo velas ngk gol g5".
-- preco_medio_estimado: Valor médio praticado no mercado brasileiro formatado em reais (ex: "R$ 520,00", "R$ 89,90")
+Diretrizes Críticas:
+1. LEITURA E TRANSCRIÇÃO:
+   - Extraia com exatidão os dados do veículo: montadora (marca), modelo, geração/versão, ano de fabricação/modelo e motorização (ex: 1.0 8V Fire, EA111 1.6, Sigma 1.6 16V). Se não constar ou estiver ilegível, atribua estritamente null.
+   - Ignore serviços de mão de obra (ex: "mão de obra troca correia", "alinhamento e balanceamento", "lavagem"). Concentre-se apenas em peças e fluidos/lubrificantes.
 
-Calcule a soma aproximada dos itens e preencha "total_estimado" (ex: "R$ 520,00").
+2. PADRONIZAÇÃO AUTOMOTIVA:
+   - No campo "peca_padronizada", use o nome comercial canônico usado em catálogos como Nakata, Cofap, Sabó, Dayco, Bosch, Cobreq. (Exemplo: se ler "buchinha da balança", padronize para "Bucha da Bandeja de Suspensão").
+   - Identifique posições relativas: Dianteiro, Traseiro, Superior, Inferior, Lado Direito (Passageiro), Lado Esquerdo (Motorista), ou Par.
 
-Retorne estritamente um JSON válido, sem comentários e sem marcações markdown fora do JSON, no seguinte formato:
-{
-  "veiculo_detectado": "Chevrolet Onix 2016",
-  "itens": [
-    {
-      "nome_peca": "Amortecedor Dianteiro (Par)",
-      "marca_recomendada": "Nakata",
-      "query_busca": "amortecedor dianteiro nakata onix par",
-      "preco_medio_estimado": "R$ 520,00"
-    }
-  ],
-  "total_estimado": "R$ 520,00"
-}`;
+3. ANTI-ALUCINAÇÃO E CONFIANÇA:
+   - Se uma palavra estiver ilegível, borrada ou ambígua, NUNCA invente uma peça. Defina "confianca" como "baixa" ou "media" e marque "requer_confirmacao": true.
+   - Gere no campo "termo_busca_mercadolivre" uma query de busca enxuta e cirúrgica, combinando apenas: [Nome Padronizado] + [Modelo] + [Motor/Ano] + [Posição/Lado se houver]. Não inclua stop-words nem frases compridas.
+
+4. SAÍDA OBRIGATÓRIA:
+   - Retorne exclusivamente o objeto JSON validado conforme o schema fornecido. Não inclua texto introdutório, explicações ou blocos markdown adicionais.`;
+
+const RESPONSE_SCHEMA = {
+  type: "OBJECT",
+  properties: {
+    veiculo: {
+      type: "OBJECT",
+      properties: {
+        marca: { type: "STRING", nullable: true },
+        modelo: { type: "STRING", nullable: true },
+        ano: { type: "STRING", nullable: true },
+        motorizacao: { type: "STRING", nullable: true },
+        placa: { type: "STRING", nullable: true },
+      },
+      required: ["marca", "modelo", "ano"],
+    },
+    itens: {
+      type: "ARRAY",
+      items: {
+        type: "OBJECT",
+        properties: {
+          termo_lido: { type: "STRING" },
+          peca_padronizada: { type: "STRING" },
+          quantidade: { type: "INTEGER" },
+          posicao: { type: "STRING", nullable: true },
+          marca_preferencial: { type: "STRING", nullable: true },
+          termo_busca_mercadolivre: { type: "STRING" },
+          confianca: {
+            type: "STRING",
+            enum: ["alta", "media", "baixa"],
+          },
+          requer_confirmacao: { type: "BOOLEAN" },
+        },
+        required: [
+          "termo_lido",
+          "peca_padronizada",
+          "quantidade",
+          "termo_busca_mercadolivre",
+          "confianca",
+          "requer_confirmacao",
+        ],
+      },
+    },
+    observacoes_gerais: { type: "STRING", nullable: true },
+  },
+  required: ["veiculo", "itens"],
+};
 
 interface PrecoRealML {
   preco: string;
@@ -66,7 +115,6 @@ async function buscarPrecoRealML(query_busca: string): Promise<PrecoRealML | nul
   if (!query_busca || !query_busca.trim()) return null;
 
   try {
-    // Monta o slug limpo para a rota de listagem
     const slug = query_busca
       .normalize("NFD")
       .replace(/[\u0300-\u036f]/g, "")
@@ -75,7 +123,6 @@ async function buscarPrecoRealML(query_busca: string): Promise<PrecoRealML | nul
       .replace(/\s+/g, "-")
       .toLowerCase();
 
-    // Monta o URL de busca ordenada por menor preço
     const url = `https://lista.mercadolivre.com.br/${encodeURIComponent(slug)}_OrderId_PRICE_ASC`;
 
     const headersList = [
@@ -101,7 +148,7 @@ async function buscarPrecoRealML(query_busca: string): Promise<PrecoRealML | nul
       try {
         const res = await fetch(url, {
           headers,
-          signal: AbortSignal.timeout(6000),
+          signal: AbortSignal.timeout(5000),
           redirect: "follow",
         });
 
@@ -119,14 +166,12 @@ async function buscarPrecoRealML(query_busca: string): Promise<PrecoRealML | nul
 
     if (!html) return null;
 
-    // Isola o primeiro item da listagem de resultados
     const firstResult =
       html.match(/<li[^>]*class="[^"]*ui-search-layout__item[^"]*"[^>]*>([\s\S]*?)<\/li>/) ||
       html.match(/<div[^>]*class="[^"]*(?:ui-search-result__wrapper|poly-card)[^"]*"[^>]*>([\s\S]*?)<\/div>\s*<\/div>/);
 
     const context = firstResult ? firstResult[1] : html;
 
-    // Extrai o primeiro bloco .ui-search-price__second-line ou .andes-money-amount
     const secondLine = context.match(/class="[^"]*ui-search-price__second-line[^"]*"[^>]*>([\s\S]*?)<\/div>/);
     const priceBlock = secondLine ? secondLine[1] : context;
 
@@ -140,7 +185,6 @@ async function buscarPrecoRealML(query_busca: string): Promise<PrecoRealML | nul
       priceBlock.match(/class="[^"]*andes-money-amount__cents[^"]*"[^>]*>([0-9]+)</) ||
       context.match(/andes-money-amount__cents[^>]*>([0-9]+)</);
 
-    // Extrai o link direto do produto se disponível
     const linkMatch = context.match(
       /href="(https:\/\/[^"]*(?:produto\.mercadolivre\.com\.br\/|mercadolivre\.com\.br\/)[^"]*)"/
     );
@@ -160,15 +204,20 @@ async function buscarPrecoRealML(query_busca: string): Promise<PrecoRealML | nul
 }
 
 /**
- * Atualiza todos os itens do orçamento com os preços reais do Mercado Livre
- * e recalcula o total estimado com exatidão.
+ * Atualiza os itens com os preços reais do Mercado Livre e formata os dados para o frontend
  */
 async function sincronizarPrecosReais(orcamento: OrcamentoResposta): Promise<OrcamentoResposta> {
   if (!orcamento?.itens || orcamento.itens.length === 0) return orcamento;
 
   await Promise.all(
     orcamento.itens.map(async (item) => {
-      const precoReal = await buscarPrecoRealML(item.query_busca);
+      // Normalização de campos de compatibilidade
+      if (!item.nome_peca) item.nome_peca = item.peca_padronizada;
+      if (!item.query_busca) item.query_busca = item.termo_busca_mercadolivre;
+      if (!item.marca_recomendada) item.marca_recomendada = item.marca_preferencial || "Original / Homologada";
+
+      const termoBusca = item.termo_busca_mercadolivre || item.query_busca || item.peca_padronizada;
+      const precoReal = await buscarPrecoRealML(termoBusca);
       if (precoReal) {
         item.preco_medio = precoReal.preco;
         item.preco_medio_estimado = precoReal.preco;
@@ -180,6 +229,13 @@ async function sincronizarPrecosReais(orcamento: OrcamentoResposta): Promise<Orc
     })
   );
 
+  // Formata veiculo_detectado para facilitar a exibição
+  if (!orcamento.veiculo_detectado && orcamento.veiculo) {
+    const { marca, modelo, motorizacao, ano } = orcamento.veiculo;
+    const partes = [marca, modelo, motorizacao, ano].filter(Boolean);
+    orcamento.veiculo_detectado = partes.length > 0 ? partes.join(" ") : "Veículo Detectado";
+  }
+
   // Recalcula o total_estimado somando os preços reais extraídos
   let totalNum = 0;
   for (const it of orcamento.itens) {
@@ -187,131 +243,192 @@ async function sincronizarPrecosReais(orcamento: OrcamentoResposta): Promise<Orc
     const num = parseFloat(
       precoStr.replace("R$", "").replace(/\./g, "").replace(",", ".").trim()
     );
-    if (!isNaN(num)) totalNum += num;
+    if (!isNaN(num)) {
+      totalNum += num * (it.quantidade || 1);
+    }
   }
 
-  orcamento.total_estimado = totalNum.toLocaleString("pt-BR", {
-    style: "currency",
-    currency: "BRL",
-  });
+  if (totalNum > 0) {
+    orcamento.total_estimado = totalNum.toLocaleString("pt-BR", {
+      style: "currency",
+      currency: "BRL",
+    });
+  }
 
   return orcamento;
 }
 
 /**
- * Parser de fallback inteligente para quando a chave do Gemini ainda não estiver configurada
+ * Parser de fallback para quando a API do Gemini não estiver acessível
  */
 function extrairFallbackInteligente(texto: string): OrcamentoResposta {
   const t = texto.toLowerCase();
 
-  // Dedução de veículo para exibição e termo enxuto para query_busca
-  let veiculo = "Veículo não especificado";
-  let termoCarro = "carro";
+  let marca = "Volkswagen";
+  let modelo = "Gol";
+  let motorizacao = "1.6";
+  let termoCarro = "gol";
 
   const anoMatch = t.match(/\b(19\d{2}|20\d{2})\b/);
-  const ano = anoMatch ? ` ${anoMatch[0]}` : "";
+  const ano = anoMatch ? anoMatch[0] : null;
 
   if (t.includes("onix")) {
-    veiculo = `Chevrolet Onix${ano || " 1.0 / 1.4"}`;
-    termoCarro = `onix${ano}`;
+    marca = "Chevrolet";
+    modelo = "Onix";
+    motorizacao = "1.0 / 1.4";
+    termoCarro = `onix ${ano || ""}`.trim();
   } else if (t.includes("hb20")) {
-    veiculo = `Hyundai HB20${ano || " 1.0"}`;
-    termoCarro = `hb20${ano}`;
+    marca = "Hyundai";
+    modelo = "HB20";
+    motorizacao = "1.0";
+    termoCarro = `hb20 ${ano || ""}`.trim();
   } else if (t.includes("gol")) {
-    veiculo = `Volkswagen Gol${ano || " G5"}`;
-    termoCarro = `gol${ano || " g5"}`;
+    marca = "Volkswagen";
+    modelo = "Gol G5";
+    motorizacao = "1.6";
+    termoCarro = `gol g5 ${ano || ""}`.trim();
   } else if (t.includes("fox")) {
-    veiculo = `Volkswagen Fox${ano || " 1.6"}`;
-    termoCarro = `fox${ano}`;
+    marca = "Volkswagen";
+    modelo = "Fox";
+    motorizacao = "1.6";
+    termoCarro = `fox ${ano || ""}`.trim();
   } else if (t.includes("palio")) {
-    veiculo = `Fiat Palio${ano || " Fire"}`;
-    termoCarro = `palio${ano}`;
+    marca = "Fiat";
+    modelo = "Palio";
+    motorizacao = "1.0 Fire";
+    termoCarro = `palio fire ${ano || ""}`.trim();
   } else if (t.includes("prisma")) {
-    veiculo = `Chevrolet Prisma${ano || " 1.4"}`;
-    termoCarro = `prisma${ano}`;
+    marca = "Chevrolet";
+    modelo = "Prisma";
+    motorizacao = "1.4";
+    termoCarro = `prisma ${ano || ""}`.trim();
   } else if (t.includes("celta")) {
-    veiculo = `Chevrolet Celta${ano || " 1.0"}`;
-    termoCarro = `celta${ano}`;
+    marca = "Chevrolet";
+    modelo = "Celta";
+    motorizacao = "1.0";
+    termoCarro = `celta ${ano || ""}`.trim();
   } else if (t.includes("civic")) {
-    veiculo = `Honda Civic${ano || " 1.8"}`;
-    termoCarro = `civic${ano}`;
+    marca = "Honda";
+    modelo = "Civic";
+    motorizacao = "1.8 16V";
+    termoCarro = `civic ${ano || ""}`.trim();
   } else if (t.includes("corolla")) {
-    veiculo = `Toyota Corolla${ano || " 2.0"}`;
-    termoCarro = `corolla${ano}`;
+    marca = "Toyota";
+    modelo = "Corolla";
+    motorizacao = "2.0 16V";
+    termoCarro = `corolla ${ano || ""}`.trim();
   }
-
-  termoCarro = termoCarro.trim();
 
   const itens: ItemOrcamento[] = [];
 
   if (/amortecedor/i.test(t)) {
     itens.push({
-      nome_peca: "Amortecedor Dianteiro Pressurizado (Par)",
-      marca_recomendada: "Nakata",
-      query_busca: `amortecedor dianteiro nakata ${termoCarro} par`,
+      termo_lido: "amortecedor dianteiro",
+      peca_padronizada: "Amortecedor Dianteiro",
+      quantidade: 2,
+      posicao: "Dianteiro",
+      marca_preferencial: "Nakata",
+      termo_busca_mercadolivre: `Amortecedor Dianteiro ${modelo} ${ano || ""} Par`.trim(),
+      confianca: "alta",
+      requer_confirmacao: false,
       preco_medio_estimado: "R$ 480,00",
     });
   }
 
   if (/pastilha/i.test(t) || /freio/i.test(t)) {
     itens.push({
-      nome_peca: "Jogo de Pastilhas de Freio Dianteiro",
-      marca_recomendada: "Cobreq",
-      query_busca: `pastilha freio dianteira cobreq ${termoCarro}`,
+      termo_lido: "pastilha de freio",
+      peca_padronizada: "Jogo de Pastilhas de Freio",
+      quantidade: 1,
+      posicao: "Dianteiro",
+      marca_preferencial: "Cobreq",
+      termo_busca_mercadolivre: `Jogo Pastilha Freio ${modelo} Dianteira`.trim(),
+      confianca: "alta",
+      requer_confirmacao: false,
       preco_medio_estimado: "R$ 89,90",
     });
   }
 
   if (/disco/i.test(t)) {
     itens.push({
-      nome_peca: "Par de Discos de Freio Ventilado",
-      marca_recomendada: "Fremax",
-      query_busca: `disco freio ventilado fremax ${termoCarro} par`,
+      termo_lido: "disco de freio",
+      peca_padronizada: "Disco de Freio Ventilado",
+      quantidade: 2,
+      posicao: "Dianteiro",
+      marca_preferencial: "Fremax",
+      termo_busca_mercadolivre: `Par Disco Freio Ventilado ${modelo}`.trim(),
+      confianca: "alta",
+      requer_confirmacao: false,
       preco_medio_estimado: "R$ 210,00",
     });
   }
 
   if (/embreagem/i.test(t) || /plato/i.test(t)) {
     itens.push({
-      nome_peca: "Kit de Embreagem (Platô, Disco e Rolamento)",
-      marca_recomendada: "LuK",
-      query_busca: `kit embreagem luk ${termoCarro}`,
+      termo_lido: "kit embreagem",
+      peca_padronizada: "Kit de Embreagem",
+      quantidade: 1,
+      posicao: null,
+      marca_preferencial: "LuK",
+      termo_busca_mercadolivre: `Kit Embreagem ${modelo} LuK`.trim(),
+      confianca: "alta",
+      requer_confirmacao: false,
       preco_medio_estimado: "R$ 440,00",
     });
   }
 
   if (/vela/i.test(t) || /ignicao/i.test(t)) {
     itens.push({
-      nome_peca: "Jogo de Velas de Ignição",
-      marca_recomendada: "NGK",
-      query_busca: `jogo velas ngk ${termoCarro}`,
+      termo_lido: "jogo velas",
+      peca_padronizada: "Jogo de Velas de Ignição",
+      quantidade: 1,
+      posicao: null,
+      marca_preferencial: "NGK",
+      termo_busca_mercadolivre: `Jogo Velas Ignicao ${modelo} NGK`.trim(),
+      confianca: "alta",
+      requer_confirmacao: false,
       preco_medio_estimado: "R$ 95,00",
     });
   }
 
   if (/correia/i.test(t) || /tensor/i.test(t)) {
     itens.push({
-      nome_peca: "Kit Correia Dentada e Tensor",
-      marca_recomendada: "Contitech",
-      query_busca: `kit correia dentada contitech ${termoCarro}`,
+      termo_lido: "correia dentada com tensor",
+      peca_padronizada: "Kit Correia Dentada e Tensor",
+      quantidade: 1,
+      posicao: null,
+      marca_preferencial: "Contitech",
+      termo_busca_mercadolivre: `Kit Correia Dentada Tensor ${modelo}`.trim(),
+      confianca: "alta",
+      requer_confirmacao: false,
       preco_medio_estimado: "R$ 160,00",
     });
   }
 
   if (/filtro/i.test(t) || /oleo/i.test(t)) {
     itens.push({
-      nome_peca: "Filtro de Óleo e Lubrificante",
-      marca_recomendada: "Mann-Filter",
-      query_busca: `filtro oleo mann ${termoCarro}`,
+      termo_lido: "filtro de oleo",
+      peca_padronizada: "Filtro de Óleo",
+      quantidade: 1,
+      posicao: null,
+      marca_preferencial: "Mann-Filter",
+      termo_busca_mercadolivre: `Filtro Oleo ${modelo} Mann`.trim(),
+      confianca: "alta",
+      requer_confirmacao: false,
       preco_medio_estimado: "R$ 42,00",
     });
   }
 
   if (itens.length === 0) {
     itens.push({
-      nome_peca: "Peças Gerais de Reposição",
-      marca_recomendada: "Nakata / Bosch",
-      query_busca: `pecas ${termoCarro}`,
+      termo_lido: "pecas gerais",
+      peca_padronizada: "Peças de Revisão Automotiva",
+      quantidade: 1,
+      posicao: null,
+      marca_preferencial: "Nakata",
+      termo_busca_mercadolivre: `Pecas ${termoCarro}`.trim(),
+      confianca: "media",
+      requer_confirmacao: true,
       preco_medio_estimado: "R$ 250,00",
     });
   }
@@ -319,14 +436,24 @@ function extrairFallbackInteligente(texto: string): OrcamentoResposta {
   let totalNum = 0;
   for (const it of itens) {
     const num = parseFloat(
-      it.preco_medio_estimado.replace("R$", "").replace(/\./g, "").replace(",", ".").trim()
+      (it.preco_medio_estimado || "0").replace("R$", "").replace(/\./g, "").replace(",", ".").trim()
     );
     if (!isNaN(num)) totalNum += num;
   }
 
+  const veiculoNome = [marca, modelo, motorizacao, ano].filter(Boolean).join(" ");
+
   return {
-    veiculo_detectado: veiculo,
+    veiculo: {
+      marca,
+      modelo,
+      ano: ano || null,
+      motorizacao,
+      placa: null,
+    },
     itens,
+    observacoes_gerais: "Resultado gerado pelo motor de inferência local.",
+    veiculo_detectado: veiculoNome,
     total_estimado: totalNum.toLocaleString("pt-BR", { style: "currency", currency: "BRL" }),
   };
 }
@@ -349,7 +476,7 @@ export async function POST(request: NextRequest) {
 
     const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
 
-    // Se a chave Gemini não estiver configurada no .env.local, usa o fallback inteligente com aviso
+    // Se a chave Gemini não estiver configurada no .env.local, usa o fallback inteligente
     if (!apiKey) {
       console.warn("GEMINI_API_KEY não encontrada no .env.local. Executando fallback inteligente.");
       const fallbackResult = extrairFallbackInteligente(texto || "Peças de revisão automotiva geral");
@@ -361,15 +488,8 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // Prepara as partes do payload multimodal para a API do Gemini
+    // Prepara as partes do payload multimodal para o Gemini
     const parts: Array<Record<string, unknown>> = [];
-
-    // Prompt do sistema
-    parts.push({
-      text: `${SYSTEM_PROMPT}\n\nAnalise o seguinte orçamento mecânico fornecido pelo cliente:\n${
-        texto ? `Texto do cliente: "${texto.trim()}"` : "Imagem do orçamento anexada."
-      }`,
-    });
 
     // Se houver imagem anexada, converte para base64 inlineData
     if (imagem && imagem.size > 0) {
@@ -385,52 +505,88 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // Chamada à API do Google Gemini (gemini-1.5-flash)
-    const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
+    // Se houver texto enviado pelo cliente
+    if (texto?.trim()) {
+      parts.push({
+        text: `Orçamento mecânico fornecido pelo cliente:\n${texto.trim()}`,
+      });
+    } else if (parts.length > 0) {
+      parts.push({
+        text: "Transcreva, higienize e estruture com precisão todas as peças deste orçamento mecânico.",
+      });
+    }
 
-    const geminiRes = await fetch(geminiUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [
-          {
-            parts,
-          },
-        ],
-        generationConfig: {
-          temperature: 0.1,
-          responseMimeType: "application/json",
+    const geminiBody = {
+      systemInstruction: {
+        parts: [{ text: SYSTEM_INSTRUCTION }],
+      },
+      contents: [
+        {
+          parts,
         },
-      }),
-    });
+      ],
+      generationConfig: {
+        temperature: 0.0,
+        responseMimeType: "application/json",
+        responseSchema: RESPONSE_SCHEMA,
+      },
+    };
 
-    if (!geminiRes.ok) {
-      const errText = await geminiRes.text();
-      console.error("Erro retornado pelo Gemini:", geminiRes.status, errText);
+    // Modelos suportados na API v1beta
+    const modelsToTry = [
+      process.env.GEMINI_MODEL,
+      "gemini-2.5-flash",
+      "gemini-flash-latest",
+      "gemini-3.8-flash",
+      "gemini-1.5-flash",
+    ].filter(Boolean) as string[];
 
-      // Fallback em caso de erro na API externa
+    let rawContent: string | null = null;
+    let lastError: string | null = null;
+
+    for (const model of modelsToTry) {
+      try {
+        const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+
+        const geminiRes = await fetch(geminiUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(geminiBody),
+          signal: AbortSignal.timeout(25000),
+        });
+
+        if (geminiRes.ok) {
+          const geminiData = await geminiRes.json();
+          const candidate = geminiData.candidates?.[0];
+          rawContent = candidate?.content?.parts?.[0]?.text || null;
+          if (rawContent) break;
+        } else {
+          lastError = await geminiRes.text();
+          console.warn(`Falha na chamada Gemini com modelo ${model} (${geminiRes.status}):`, lastError.slice(0, 150));
+        }
+      } catch (err) {
+        lastError = err instanceof Error ? err.message : String(err);
+        console.warn(`Erro de conexão ao chamar modelo ${model}:`, lastError);
+      }
+    }
+
+    if (!rawContent) {
+      console.error("Todos os modelos Gemini falharam. Último erro:", lastError);
+
       if (texto?.trim()) {
         const fallbackResult = extrairFallbackInteligente(texto);
         const orcamentoAtualizado = await sincronizarPrecosReais(fallbackResult);
         return NextResponse.json({
           success: true,
           data: orcamentoAtualizado,
-          aviso: "A API do Gemini retornou uma falha temporária. Resultado gerado com preços reais do Mercado Livre.",
+          aviso: "A API do Gemini retornou uma instabilidade temporária. Resultado gerado com preços reais do Mercado Livre.",
         });
       }
 
-      throw new Error(`Falha na API do Gemini (${geminiRes.status}): ${errText}`);
+      throw new Error(`Falha ao processar orçamento com IA: ${lastError || "Sem resposta do modelo."}`);
     }
 
-    const geminiData = await geminiRes.json();
-    const candidate = geminiData.candidates?.[0];
-    const rawContent = candidate?.content?.parts?.[0]?.text;
-
-    if (!rawContent) {
-      throw new Error("A IA não retornou conteúdo legível.");
-    }
-
-    // Limpeza de possíveis blocos de código markdown ```json ... ```
+    // Limpeza de possíveis blocos markdown
     let cleanJson = rawContent.trim();
     if (cleanJson.startsWith("```")) {
       cleanJson = cleanJson.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "");
