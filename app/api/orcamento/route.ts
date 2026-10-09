@@ -121,129 +121,126 @@ export interface OfertaRealML {
 }
 
 /**
- * Consulta o preço real e atualizado diretamente de anúncios confiáveis e novos do Mercado Livre
+ * Consulta o preço real e atualizado diretamente de anúncios públicos do Mercado Livre
  */
 async function buscarPrecoMercadoLivre(termoBusca: string): Promise<OfertaRealML | null> {
   if (!termoBusca || !termoBusca.trim()) return null;
 
-  // 1. Tenta a API direta do Mercado Livre Brasil (MLB) filtrando por itens novos (2230284)
   try {
-    const url = `https://api.mercadolibre.com/sites/MLB/search?q=${encodeURIComponent(termoBusca)}&condition=2230284&limit=5`;
-    const res = await fetch(url, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        Accept: "application/json",
-      },
-      signal: AbortSignal.timeout(4500),
-    });
+    const url = `https://lista.mercadolivre.com.br/${encodeURIComponent(termoBusca)}_OrderId_PRICE_ASC_NoIndex_True`;
 
-    if (res.ok) {
-      const data = await res.json();
-      const anunciosValidos = (data.results || []).filter(
-        (item: { price?: number }) => item.price && item.price > 5
-      );
-
-      // Prioriza produtos com frete Full ou lojas confiáveis
-      const melhorOferta =
-        anunciosValidos.find(
-          (item: { shipping?: { logistic_type?: string } }) =>
-            item.shipping?.logistic_type === "fulfillment"
-        ) || anunciosValidos[0];
-
-      if (melhorOferta) {
-        const precoNum = Number(melhorOferta.price);
-        return {
-          preco: precoNum,
-          preco_formatado: precoNum.toLocaleString("pt-BR", {
-            style: "currency",
-            currency: "BRL",
-          }),
-          titulo: melhorOferta.title,
-          link: melhorOferta.permalink,
-          tem_full: melhorOferta.shipping?.logistic_type === "fulfillment",
-          thumbnail: melhorOferta.thumbnail || null,
-        };
-      }
-    }
-  } catch (error) {
-    console.warn("Aviso na chamada direta da API do ML, tentando busca segura:", error);
-  }
-
-  // 2. Fallback de busca segura estruturada (quando a API retornar 403 por IP/Vercel)
-  try {
-    const slug = termoBusca
-      .normalize("NFD")
-      .replace(/[\u0300-\u036f]/g, "")
-      .replace(/[^a-zA-Z0-9\s]/g, " ")
-      .trim()
-      .replace(/\s+/g, "-")
-      .toLowerCase();
-
-    const searchUrl = `https://lista.mercadolivre.com.br/${encodeURIComponent(slug)}_OrderId_PRICE_ASC`;
-    const res = await fetch(searchUrl, {
+    let res = await fetch(url, {
       headers: {
         "User-Agent":
-          "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
-        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "pt-BR,pt;q=0.9",
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
       },
-      signal: AbortSignal.timeout(5000),
+      next: { revalidate: 3600 },
+      signal: AbortSignal.timeout(6000),
     });
 
-    if (res.ok) {
-      const html = await res.text();
-      const cardMatch =
-        html.match(/<div[^>]*class="[^"]*poly-card[^"]*"[^>]*>([\s\S]*?)<\/div>\s*<\/div>/) ||
-        html.match(/<li[^>]*class="[^"]*ui-search-layout__item[^"]*"[^>]*>([\s\S]*?)<\/li>/);
+    let html = res.ok ? await res.text() : "";
 
-      const context = cardMatch ? cardMatch[0] : html;
+    // Se o Mercado Livre retornar desafio de tráfego suspeito na Vercel/datacenter, utiliza crawler social verificado
+    if (!res.ok || html.includes("suspicious-traffic") || !html.includes("andes-money-amount")) {
+      const fallbackRes = await fetch(url, {
+        headers: {
+          "User-Agent": "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "Accept-Language": "pt-BR,pt;q=0.9",
+        },
+        next: { revalidate: 3600 },
+        signal: AbortSignal.timeout(6000),
+      });
 
-      const pMatch = context.match(/class="[^"]*andes-money-amount__fraction[^"]*"[^>]*>([0-9.]+)</);
-      const cMatch = context.match(/class="[^"]*andes-money-amount__cents[^"]*"[^>]*>([0-9]+)</);
-
-      if (pMatch) {
-        const fracao = pMatch[1];
-        const centavos = cMatch ? cMatch[1] : "00";
-        const valorNumerico =
-          parseFloat(fracao.replace(/\./g, "")) + parseFloat(centavos) / 100;
-
-        const titleMatch =
-          context.match(
-            /class="[^"]*poly-component__title[^"]*"[^>]*><a[^>]*>([^<]+)<\/a>/
-          ) ||
-          context.match(/class="[^"]*ui-search-item__title[^"]*"[^>]*>([^<]+)</) ||
-          context.match(/<h2[^>]*>([^<]+)<\/h2>/);
-
-        const linkMatch = context.match(
-          /href="(https:\/\/[^"]*(?:produto\.mercadolivre\.com\.br\/|mercadolivre\.com\.br\/[^\/]+\/up\/|mercadolivre\.com\.br\/p\/MLB)[^"]*)"/
-        );
-
-        const thumbMatch = context.match(
-          /(?:src|data-src)="(https:\/\/[^"]*(?:http2\.mlstatic\.com\/D_[^"]*))"/
-        );
-
-        const temFull =
-          context.includes("poly-component__fulfillment") ||
-          context.includes("ui-search-item__fulfillment") ||
-          context.includes("Full");
-
-        const cleanLink = linkMatch ? linkMatch[1].split("#")[0].split("?")[0] : null;
-
-        return {
-          preco: valorNumerico,
-          preco_formatado: `R$ ${fracao},${centavos}`,
-          titulo: titleMatch ? titleMatch[1].trim() : termoBusca,
-          link: cleanLink || `https://lista.mercadolivre.com.br/${encodeURIComponent(slug)}`,
-          tem_full: temFull,
-          thumbnail: thumbMatch ? thumbMatch[1] : null,
-        };
+      if (fallbackRes.ok) {
+        html = await fallbackRes.text();
+      } else {
+        console.error(`Erro ao acessar ML: ${res.status || fallbackRes.status}`);
+        return null;
       }
     }
-  } catch (error) {
-    console.error("Erro no fallback de busca do ML:", error);
-  }
 
-  return null;
+    // 1. Tenta extrair dados estruturados JSON-LD (Schema.org) se disponível
+    const jsonLdMatch = html.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/);
+    if (jsonLdMatch) {
+      try {
+        const parsed = JSON.parse(jsonLdMatch[1]);
+        if (parsed?.offers?.price) {
+          const precoNumerico = Number(parsed.offers.price);
+          return {
+            preco: precoNumerico,
+            preco_formatado: precoNumerico.toLocaleString("pt-BR", {
+              style: "currency",
+              currency: "BRL",
+            }),
+            titulo: parsed.name || termoBusca,
+            link: parsed.url || url,
+            tem_full:
+              html.includes("full-badge") ||
+              html.includes("Envio Full") ||
+              html.includes("svg-icon-full") ||
+              html.includes("poly-component__fulfillment"),
+            thumbnail: parsed.image || null,
+          };
+        }
+      } catch (e) {
+        console.warn("Erro ao fazer parse de JSON-LD:", e);
+      }
+    }
+
+    // 2. Extração via Regex no HTML dos cards de produto da nova busca do ML
+    // Busca o padrão de fração de preço: class="andes-money-amount__fraction">XXX</span>
+    const matchPreco =
+      html.match(/class="andes-money-amount__fraction"[^>]*>([\d\.]+)<\/span>/) ||
+      html.match(/class="[^"]*andes-money-amount__fraction[^"]*"[^>]*>([\d\.]+)/);
+    const matchCentavos = html.match(/class="[^"]*andes-money-amount__cents[^"]*"[^>]*>([\d]+)/);
+
+    const matchLink =
+      html.match(/href="(https:\/\/[^"]*mercadolivre\.com\.br\/[a-zA-Z0-9-]+\/up\/MLBU?[0-9]+[^"]*)"/) ||
+      html.match(/href="(https:\/\/produto\.mercadolivre\.com\.br\/MLB-[0-9]+[^"]*)"/) ||
+      html.match(/href="(https:\/\/[^"]*mercadolivre\.com\.br\/p\/MLB[0-9]+[^"]*)"/) ||
+      html.match(/href="(https:\/\/[^"]*mercadolivre\.com\.br\/MLB-[^"]*)"/);
+
+    const matchTitulo =
+      html.match(/class="[^"]*(?:poly-component__title|ui-search-item__title)[^"]*"[^>]*><a[^>]*>([^<]+)<\/a>/) ||
+      html.match(/class="[^"]*(?:poly-component__title|ui-search-item__title)[^"]*"[^>]*>([^<]+)</) ||
+      html.match(/<h2[^>]*>([^<]+)<\/h2>/);
+
+    const matchThumb = html.match(/(?:src|data-src)="(https:\/\/[^"]*(?:http2\.mlstatic\.com\/D_[^"]*))"/);
+
+    if (matchPreco) {
+      const valorFormatado = matchPreco[1].replace(/\./g, "");
+      const centavos = matchCentavos ? matchCentavos[1] : "00";
+      const precoNumerico = parseFloat(valorFormatado) + parseFloat(centavos) / 100;
+
+      const rawLink = matchLink
+        ? matchLink[1].replace(/&amp;/g, "&")
+        : `https://lista.mercadolivre.com.br/${encodeURIComponent(termoBusca)}`;
+      const cleanLink = rawLink.split("#")[0].split("?")[0];
+
+      return {
+        preco: precoNumerico,
+        preco_formatado: precoNumerico.toLocaleString("pt-BR", {
+          style: "currency",
+          currency: "BRL",
+        }),
+        titulo: matchTitulo ? matchTitulo[1].trim() : termoBusca,
+        link: cleanLink,
+        tem_full:
+          html.includes("full-badge") ||
+          html.includes("svg-icon-full") ||
+          html.includes("poly-component__fulfillment") ||
+          html.includes("Envio Full"),
+        thumbnail: matchThumb ? matchThumb[1] : null,
+      };
+    }
+
+    return null;
+  } catch (error) {
+    console.error("Erro no scraping do ML:", error);
+    return null;
+  }
 }
 
 /**
