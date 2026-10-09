@@ -21,6 +21,7 @@ import {
   Tag,
   ShieldCheck,
   ShoppingBag,
+  Package,
 } from "lucide-react";
 
 interface ItemOrcamento {
@@ -65,6 +66,65 @@ const EXEMPLOS_PRONTOS = [
   "Hyundai HB20 1.0 2018: Troca de discos de freio, pastilhas dianteiras e filtro de óleo",
 ];
 
+/**
+ * Gera uma busca consolidada de kit completo para o Mercado Livre
+ */
+function gerarQueryKitCompleto(resultado: OrcamentoResultado): string {
+  if (!resultado?.itens || resultado.itens.length === 0) return "";
+
+  const veiculo = resultado.veiculo;
+  const modelo = veiculo?.modelo || "";
+  const ano = veiculo?.ano || "";
+  const motor = veiculo?.motorizacao || "";
+
+  // Agrupa os componentes principais identificados
+  const componentesChave: string[] = [];
+
+  for (const item of resultado.itens) {
+    const nome = (item.peca_padronizada || item.nome_peca || "").toLowerCase();
+
+    if (nome.includes("amortecedor") && !componentesChave.includes("amortecedores")) {
+      componentesChave.push("amortecedores");
+    } else if (nome.includes("pastilha") && !componentesChave.includes("pastilhas")) {
+      componentesChave.push("pastilhas");
+    } else if (nome.includes("disco") && !componentesChave.includes("discos")) {
+      componentesChave.push("discos");
+    } else if (nome.includes("embreagem") && !componentesChave.includes("kit embreagem")) {
+      componentesChave.push("kit embreagem");
+    } else if (nome.includes("correia") && !componentesChave.includes("kit correia dentada")) {
+      componentesChave.push("kit correia dentada");
+    } else if (
+      nome.includes("tensor") &&
+      !componentesChave.includes("kit correia dentada") &&
+      !componentesChave.includes("tensor")
+    ) {
+      componentesChave.push("tensor");
+    } else if (nome.includes("vela") && !componentesChave.includes("velas")) {
+      componentesChave.push("velas");
+    } else if (nome.includes("filtro") && !componentesChave.includes("filtros")) {
+      componentesChave.push("filtros");
+    } else if (nome.includes("bucha") && !componentesChave.includes("buchas")) {
+      componentesChave.push("buchas");
+    } else if ((nome.includes("pivo") || nome.includes("pivô")) && !componentesChave.includes("pivos")) {
+      componentesChave.push("pivos");
+    } else if (nome.includes("bieleta") && !componentesChave.includes("bieletas")) {
+      componentesChave.push("bieletas");
+    } else if (nome.includes("coxim") && !componentesChave.includes("coxim")) {
+      componentesChave.push("coxim");
+    } else if (nome.includes("bomba") && !componentesChave.includes("bomba")) {
+      componentesChave.push("bomba");
+    }
+  }
+
+  if (componentesChave.length > 0) {
+    const lista = componentesChave.slice(0, 3).join(" ");
+    const termo = lista.startsWith("kit") ? lista : `kit ${lista}`;
+    return `${termo} ${modelo} ${ano}`.trim().replace(/\s+/g, " ");
+  }
+
+  return `kit pecas ${modelo} ${motor} ${ano}`.trim().replace(/\s+/g, " ");
+}
+
 export default function OrcamentoPage() {
   const [texto, setTexto] = useState("");
   const [imagem, setImagem] = useState<File | null>(null);
@@ -75,6 +135,7 @@ export default function OrcamentoPage() {
   const [resultado, setResultado] = useState<OrcamentoResultado | null>(null);
   const [aviso, setAviso] = useState<string | null>(null);
   const [erro, setErro] = useState<string | null>(null);
+  const [avisoPopup, setAvisoPopup] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const cameraInputRef = useRef<HTMLInputElement | null>(null);
@@ -133,6 +194,7 @@ export default function OrcamentoPage() {
     setErro(null);
     setAviso(null);
     setResultado(null);
+    setAvisoPopup(false);
 
     try {
       const formData = new FormData();
@@ -168,11 +230,22 @@ export default function OrcamentoPage() {
     }
   };
 
-  // Função handleClick que executa window.open() para cada item da lista individualmente com o link correspondente
+  // Abre a pesquisa de kit completo consolidado em uma única aba (nunca bloqueado por pop-up)
+  const handleVerKitCompleto = () => {
+    if (!resultado) return;
+    const queryKit = gerarQueryKitCompleto(resultado);
+    const url = `/api/redirect?query=${encodeURIComponent(queryKit)}`;
+    window.open(url, "_blank");
+  };
+
+  // Abre todas as peças individuais com proteção e detecção de bloqueio de pop-ups
   const handleClick = () => {
     if (!resultado?.itens || resultado.itens.length === 0) return;
 
-    resultado.itens.forEach((item, index) => {
+    let bloqueado = false;
+    let abertas = 0;
+
+    resultado.itens.forEach((item) => {
       const termo =
         item.termo_busca_mercadolivre ||
         item.query_busca ||
@@ -180,14 +253,23 @@ export default function OrcamentoPage() {
         item.nome_peca ||
         "";
       const url = `/api/redirect?query=${encodeURIComponent(termo)}`;
-      if (index === 0) {
-        window.open(url, "_blank");
-      } else {
-        setTimeout(() => {
-          window.open(url, "_blank");
-        }, index * 250);
+
+      try {
+        const novaAba = window.open(url, "_blank");
+        if (!novaAba || novaAba.closed || typeof novaAba.closed === "undefined") {
+          bloqueado = true;
+        } else {
+          abertas++;
+        }
+      } catch {
+        bloqueado = true;
       }
     });
+
+    // Se o navegador bloqueou após a primeira aba ou impediu a abertura
+    if (bloqueado || (resultado.itens.length > 1 && abertas < resultado.itens.length)) {
+      setAvisoPopup(true);
+    }
   };
 
   const handleAbrirTodas = handleClick;
@@ -507,14 +589,27 @@ Peças:
                   </p>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={handleClick}
-                  className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-zinc-900 dark:bg-white text-white dark:text-zinc-900 text-xs font-bold hover:opacity-90 transition shadow-sm cursor-pointer self-start sm:self-auto"
-                >
-                  <ExternalLink className="w-3.5 h-3.5" />
-                  <span>Abrir todas as peças no Mercado Livre</span>
-                </button>
+                <div className="flex flex-wrap items-center gap-2.5 self-start sm:self-auto">
+                  <button
+                    type="button"
+                    onClick={handleVerKitCompleto}
+                    className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-zinc-950 text-xs font-bold transition shadow-md hover:shadow-lg cursor-pointer transform active:scale-95"
+                    title="Pesquisar todas as peças agrupadas em um kit completo no Mercado Livre"
+                  >
+                    <Package className="w-4 h-4 text-zinc-950" />
+                    <span>Ver Kit Completo no Mercado Livre</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleClick}
+                    className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-zinc-900 dark:bg-white text-white dark:text-zinc-900 text-xs font-bold hover:opacity-90 transition shadow-sm cursor-pointer"
+                    title="Abre as peças individualmente em abas do navegador"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    <span>Abrir todas em abas separadas</span>
+                  </button>
+                </div>
               </div>
 
               <div className="overflow-x-auto">
@@ -636,17 +731,28 @@ Peças:
                   Os valores são estimativas de mercado. Ao clicar, você será direcionado para anúncios oficiais com envio Full.
                 </div>
 
-                <div className="flex items-center gap-3">
+                <div className="flex flex-wrap items-center gap-3">
                   <button
                     type="button"
                     onClick={() => {
                       setResultado(null);
                       setTexto("");
                       handleClearImage();
+                      setAvisoPopup(false);
                     }}
                     className="px-4 py-2 rounded-xl text-xs font-semibold text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200 dark:hover:bg-zinc-800 transition cursor-pointer"
                   >
                     Fazer Nova Cotação
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleVerKitCompleto}
+                    className="px-4 py-2.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-zinc-950 text-xs font-bold transition shadow-md hover:shadow-lg cursor-pointer flex items-center gap-2 transform active:scale-95"
+                    title="Pesquisar todas as peças agrupadas em um kit completo no Mercado Livre"
+                  >
+                    <Package className="w-4 h-4 text-zinc-950" />
+                    <span>Ver Kit Completo no Mercado Livre</span>
                   </button>
 
                   <button
@@ -662,6 +768,108 @@ Peças:
               </div>
             </div>
           </section>
+        )}
+
+        {/* Modal de Aviso e Abertura Rápida caso o navegador bloqueie múltiplas abas */}
+        {avisoPopup && resultado && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-zinc-950/70 backdrop-blur-sm animate-in fade-in duration-200">
+            <div className="bg-white dark:bg-zinc-900 border-2 border-zinc-200 dark:border-zinc-800 rounded-3xl max-w-lg w-full p-6 shadow-2xl space-y-5 relative">
+              <button
+                type="button"
+                onClick={() => setAvisoPopup(false)}
+                className="absolute top-5 right-5 p-1.5 rounded-xl text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition cursor-pointer"
+                title="Fechar"
+              >
+                <X className="w-5 h-5" />
+              </button>
+
+              <div className="flex items-start gap-3.5">
+                <div className="w-10 h-10 rounded-2xl bg-amber-100 dark:bg-amber-950/60 text-amber-600 dark:text-amber-400 flex items-center justify-center shrink-0">
+                  <AlertCircle className="w-5 h-5" />
+                </div>
+                <div>
+                  <h4 className="text-base font-bold text-zinc-900 dark:text-white">
+                    Bloqueador de Pop-ups Ativo
+                  </h4>
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
+                    O seu navegador bloqueou a abertura automática de várias abas simultâneas por segurança.
+                  </p>
+                </div>
+              </div>
+
+              {/* Opção 1: Kit Completo em 1 única aba */}
+              <div className="bg-amber-50/70 dark:bg-amber-950/30 border border-amber-200/80 dark:border-amber-900/60 rounded-2xl p-4 space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-amber-900 dark:text-amber-200 flex items-center gap-1.5">
+                    <Package className="w-4 h-4 text-amber-500" />
+                    Opção 1: Ver Kit Completo (1 única aba)
+                  </span>
+                  <span className="text-[10px] uppercase font-bold bg-amber-200 dark:bg-amber-900/80 text-amber-900 dark:text-amber-300 px-2 py-0.5 rounded-full">
+                    Recomendado
+                  </span>
+                </div>
+                <p className="text-xs text-zinc-600 dark:text-zinc-400">
+                  Pesquisa consolidada com as peças agrupadas em um único pacote no Mercado Livre (não sofre bloqueio de pop-up):
+                </p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    handleVerKitCompleto();
+                    setAvisoPopup(false);
+                  }}
+                  className="w-full py-2.5 px-4 rounded-xl bg-amber-400 hover:bg-amber-300 text-zinc-950 font-bold text-xs flex items-center justify-center gap-2 shadow transition cursor-pointer"
+                >
+                  <Package className="w-4 h-4" />
+                  <span>Ver Kit Completo no Mercado Livre</span>
+                </button>
+              </div>
+
+              {/* Opção 2: Lista com links individuais de 1 clique */}
+              <div className="space-y-2">
+                <span className="text-xs font-bold text-zinc-700 dark:text-zinc-300 block">
+                  Opção 2: Abrir cada peça manualmente:
+                </span>
+                <div className="max-h-48 overflow-y-auto space-y-1.5 pr-1">
+                  {resultado.itens.map((item, idx) => {
+                    const termo =
+                      item.termo_busca_mercadolivre ||
+                      item.query_busca ||
+                      item.peca_padronizada ||
+                      item.nome_peca ||
+                      "";
+                    return (
+                      <a
+                        key={idx}
+                        href={`/api/redirect?query=${encodeURIComponent(termo)}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center justify-between p-2.5 rounded-xl bg-zinc-50 dark:bg-zinc-800/60 hover:bg-zinc-100 dark:hover:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 text-xs transition"
+                      >
+                        <span className="font-semibold text-zinc-800 dark:text-zinc-200 truncate pr-2">
+                          {idx + 1}. {item.peca_padronizada || item.nome_peca}
+                        </span>
+                        <span className="text-[11px] font-bold text-emerald-600 dark:text-emerald-400 flex items-center gap-1 shrink-0">
+                          <span>Abrir peça</span>
+                          <ExternalLink className="w-3 h-3" />
+                        </span>
+                      </a>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="pt-1 text-[11px] text-zinc-400 flex items-center justify-between border-t border-zinc-100 dark:border-zinc-800">
+                <span>Dica: Permita pop-ups na barra de endereços para abrir todas direto.</span>
+                <button
+                  type="button"
+                  onClick={() => setAvisoPopup(false)}
+                  className="text-xs font-semibold text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 cursor-pointer"
+                >
+                  Fechar
+                </button>
+              </div>
+            </div>
+          </div>
         )}
       </main>
 
