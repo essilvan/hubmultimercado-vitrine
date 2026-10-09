@@ -532,13 +532,14 @@ export async function POST(request: NextRequest) {
       },
     };
 
-    // Modelos suportados na API v1beta
+    // Modelos suportados na API v1beta (gemini-3.5-flash e variantes ativas)
     const modelsToTry = [
       process.env.GEMINI_MODEL,
-      "gemini-2.5-flash",
+      "gemini-3.5-flash",
+      "gemini-3.5-flash-lite",
+      "gemini-3.1-flash-lite",
       "gemini-flash-latest",
       "gemini-3.8-flash",
-      "gemini-1.5-flash",
     ].filter(Boolean) as string[];
 
     let rawContent: string | null = null;
@@ -552,7 +553,7 @@ export async function POST(request: NextRequest) {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(geminiBody),
-          signal: AbortSignal.timeout(25000),
+          signal: AbortSignal.timeout(15000),
         });
 
         if (geminiRes.ok) {
@@ -562,16 +563,16 @@ export async function POST(request: NextRequest) {
           if (rawContent) break;
         } else {
           lastError = await geminiRes.text();
-          console.warn(`Falha na chamada Gemini com modelo ${model} (${geminiRes.status}):`, lastError.slice(0, 150));
+          console.error(`Erro Gemini (modelo ${model} - status ${geminiRes.status}):`, lastError);
         }
       } catch (err) {
         lastError = err instanceof Error ? err.message : String(err);
-        console.warn(`Erro de conexão ao chamar modelo ${model}:`, lastError);
+        console.error(`Erro Gemini (conexão com ${model}):`, lastError);
       }
     }
 
     if (!rawContent) {
-      console.error("Todos os modelos Gemini falharam. Último erro:", lastError);
+      console.error("Erro Gemini: Todos os modelos disponíveis falharam.", lastError);
 
       if (texto?.trim()) {
         const fallbackResult = extrairFallbackInteligente(texto);
@@ -579,7 +580,7 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({
           success: true,
           data: orcamentoAtualizado,
-          aviso: "A API do Gemini retornou uma instabilidade temporária. Resultado gerado com preços reais do Mercado Livre.",
+          aviso: "A API do Gemini retornou uma instabilidade temporária. Resultado gerado pelo motor de inferência local.",
         });
       }
 
@@ -602,6 +603,7 @@ export async function POST(request: NextRequest) {
       data: orcamentoComPrecosReais,
     });
   } catch (err: unknown) {
+    console.error("Erro Gemini:", err);
     console.error("Erro no processamento do orçamento:", err);
     const msg =
       err instanceof Error ? err.message : "Erro desconhecido ao processar orçamento com IA.";
