@@ -1180,6 +1180,146 @@ function deduzirPrecoReferenciaMercado(termo: string, veiculo?: string | null) {
   return { preco: 149.90, marca: "Original / Homologada", titulo: `${termo}${v}` };
 }
 
+export const MODELOS_COMPATIVEIS_MAP: Record<string, string[]> = {
+  // Volkswagen
+  "gol": ["gol", "voyage", "saveiro", "parati", "fox"],
+  "voyage": ["voyage", "gol", "saveiro", "parati", "fox"],
+  "saveiro": ["saveiro", "gol", "voyage", "parati"],
+  "fox": ["fox", "crossfox", "spacefox", "polo", "gol", "voyage"],
+  "polo": ["polo", "virtus", "nivus", "t-cross", "fox"],
+  "virtus": ["virtus", "polo", "nivus", "t-cross"],
+  "t-cross": ["t-cross", "nivus", "polo", "virtus"],
+  "nivus": ["nivus", "t-cross", "polo", "virtus"],
+  "up": ["up", "up!"],
+  "golf": ["golf", "bora", "jetta"],
+  "jetta": ["jetta", "golf", "passat", "tiguan"],
+  "tiguan": ["tiguan", "jetta", "passat"],
+  "amarok": ["amarok"],
+
+  // Chevrolet
+  "onix": ["onix", "prisma", "spin", "cobalt"],
+  "prisma": ["prisma", "onix", "celta", "corsa"],
+  "celta": ["celta", "prisma", "corsa"],
+  "corsa": ["corsa", "celta", "prisma", "montana", "meriva"],
+  "montana": ["montana", "corsa", "agile"],
+  "agile": ["agile", "montana"],
+  "cobalt": ["cobalt", "spin", "onix"],
+  "spin": ["spin", "cobalt", "onix"],
+  "cruze": ["cruze", "tracker"],
+  "tracker": ["tracker", "cruze"],
+  "s10": ["s10", "blazer", "trailblazer"],
+  "astra": ["astra", "zafira", "vectra"],
+  "vectra": ["vectra", "astra", "zafira"],
+  "zafira": ["zafira", "astra", "vectra"],
+
+  // Fiat
+  "palio": ["palio", "siena", "strada", "weekend", "idea", "punto"],
+  "uno": ["uno", "fiorino", "premio", "elba", "mobi"],
+  "mobi": ["mobi", "uno", "argo"],
+  "argo": ["argo", "cronos", "pulse", "fastback"],
+  "cronos": ["cronos", "argo", "pulse"],
+  "pulse": ["pulse", "fastback", "argo"],
+  "fastback": ["fastback", "pulse", "argo"],
+  "strada": ["strada", "palio", "siena"],
+  "toro": ["toro", "renegade", "compass"],
+  "punto": ["punto", "linea", "bravo"],
+  "linea": ["linea", "punto"],
+  "siena": ["siena", "palio", "grand siena"],
+
+  // Hyundai
+  "hb20": ["hb20", "hb20s", "hb20x"],
+  "creta": ["creta"],
+  "tucson": ["tucson", "ix35", "sportage"],
+  "ix35": ["ix35", "tucson", "sportage"],
+  "i30": ["i30"],
+
+  // Ford
+  "ka": ["ka", "fiesta", "ecosport"],
+  "fiesta": ["fiesta", "ka", "ecosport", "courier"],
+  "ecosport": ["ecosport", "fiesta", "focus"],
+  "focus": ["focus"],
+  "ranger": ["ranger"],
+
+  // Honda
+  "civic": ["civic", "cr-v"],
+  "fit": ["fit", "city", "wr-v", "hr-v"],
+  "city": ["city", "fit", "wr-v", "hr-v"],
+  "hr-v": ["hr-v", "wr-v", "fit", "city"],
+  "cr-v": ["cr-v", "civic"],
+
+  // Toyota
+  "corolla": ["corolla", "corolla cross"],
+  "etios": ["etios", "yaris"],
+  "yaris": ["yaris", "etios"],
+  "hilux": ["hilux", "sw4"],
+  "sw4": ["sw4", "hilux"],
+
+  // Renault
+  "kwid": ["kwid"],
+  "sandero": ["sandero", "logan", "duster", "stepway"],
+  "logan": ["logan", "sandero", "duster"],
+  "duster": ["duster", "oroch", "captur", "sandero"],
+  "clio": ["clio", "scenic", "megane", "kangoo"],
+
+  // Nissan
+  "kicks": ["kicks", "versa", "march"],
+  "march": ["march", "versa", "kicks"],
+  "versa": ["versa", "march", "kicks"],
+  "sentra": ["sentra"],
+  "frontier": ["frontier"],
+
+  // Jeep
+  "renegade": ["renegade", "compass", "toro"],
+  "compass": ["compass", "renegade", "toro", "commander"],
+
+  // Peugeot / Citroën
+  "206": ["206", "207", "c3"],
+  "207": ["207", "206", "c3", "hoggar"],
+  "208": ["208", "2008", "c3"],
+  "c3": ["c3", "aircross", "208", "207"],
+  "c4": ["c4", "c4 pallas", "c4 cactus", "307", "308"],
+};
+
+/**
+ * Filtro de compatibilidade: se o título do anúncio do Mercado Livre contiver
+ * palavras de modelos concorrentes/incompatíveis com o veículo solicitado,
+ * retorna false para descartar esse anúncio e pegar o próximo.
+ */
+export function isTituloCompativel(tituloAnuncio?: string | null, veiculoAlvo?: string | null): boolean {
+  if (!tituloAnuncio || !veiculoAlvo) return true;
+
+  const tAnuncio = tituloAnuncio.toLowerCase();
+  const tVeiculo = veiculoAlvo.toLowerCase();
+
+  // Encontra qual modelo principal corresponde ao veículo do usuário
+  let modeloDetectado: string | null = null;
+  for (const mod of Object.keys(MODELOS_COMPATIVEIS_MAP)) {
+    const reg = new RegExp(`\\b${mod}\\b`, "i");
+    if (reg.test(tVeiculo)) {
+      modeloDetectado = mod;
+      break;
+    }
+  }
+
+  // Se nenhum modelo específico foi detectado no veículo de referência, considera compatível
+  if (!modeloDetectado) return true;
+
+  const compativeis = new Set(MODELOS_COMPATIVEIS_MAP[modeloDetectado] || [modeloDetectado]);
+
+  // Checa se o título do anúncio contém algum modelo concorrente não compatível
+  for (const outroModelo of Object.keys(MODELOS_COMPATIVEIS_MAP)) {
+    if (compativeis.has(outroModelo)) continue;
+
+    const reg = new RegExp(`\\b${outroModelo}\\b`, "i");
+    if (reg.test(tAnuncio)) {
+      // O anúncio cita explicitamente um modelo concorrente/incompatível
+      return false;
+    }
+  }
+
+  return true;
+}
+
 export interface OfertaRealML {
   preco: number;
   preco_formatado: string;
@@ -1217,7 +1357,7 @@ export async function buscarPrecoMercadoLivre(
 
   // 2. Requisição para a API oficial do Mercado Livre
   try {
-    const apiUrl = `https://api.mercadolivre.com/sites/MLB/search?q=${encodeURIComponent(queryLimpa)}&limit=10`;
+    const apiUrl = `https://api.mercadolibre.com/sites/MLB/search?q=${encodeURIComponent(queryLimpa)}&limit=10`;
     const headers: Record<string, string> = {
       Accept: "application/json",
       "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -1241,8 +1381,36 @@ export async function buscarPrecoMercadoLivre(
       const data = await res.json();
       const results = data.results || [];
       if (results.length > 0) {
-        // Obtenha o primeiro anúncio válido retornado em data.results[0]
-        const item = results.find((it: any) => it && (Number(it.price) > 0 || Number(it.original_price) > 0)) || results[0];
+        // Encontra o primeiro anúncio que tenha preço válido E seja compatível com o veículo
+        let item = results.find((it: any) => {
+          const preco = Number(it?.price) || Number(it?.original_price) || 0;
+          if (preco <= 0 || !it?.title) return false;
+          return isTituloCompativel(it.title, veiculoDetectado);
+        });
+
+        // Se nenhum passou no filtro de compatibilidade, tenta busca mais restrita
+        if (!item && veiculoDetectado && results.length > 0) {
+          console.warn(`[ML Search] Anúncios incompatíveis para "${veiculoDetectado}". Tentando busca restrita...`);
+          const modeloPrimeiro = veiculoDetectado.split(" ")[0].trim();
+          const queryMaisRestrita = `"${modeloPrimeiro}" ${queryLimpa}`;
+          try {
+            const resRestrito = await fetch(
+              `https://api.mercadolibre.com/sites/MLB/search?q=${encodeURIComponent(queryMaisRestrita)}&limit=10`,
+              { headers, signal: AbortSignal.timeout(6000) }
+            );
+            if (resRestrito.ok) {
+              const dataRestrito = await resRestrito.json();
+              const resultsRestritos = dataRestrito.results || [];
+              item = resultsRestritos.find((it: any) => {
+                const preco = Number(it?.price) || Number(it?.original_price) || 0;
+                if (preco <= 0 || !it?.title) return false;
+                return isTituloCompativel(it.title, veiculoDetectado);
+              });
+            }
+          } catch {}
+        }
+
+        // Se encontrou item válido compatível
         if (item) {
           const precoNumerico = Number(item.price) || Number(item.original_price) || 0;
           if (precoNumerico > 0) {
@@ -1324,42 +1492,56 @@ export async function buscarPrecoMercadoLivre(
       const html = await res.text();
       if (!html.includes("suspicious-traffic") && (html.includes("andes-money-amount") || html.includes("poly-component"))) {
         const cards = [...html.matchAll(/<li[^>]*class="[^"]*ui-search-layout__item[^"]*"[\s\S]*?<\/li>/gi)];
-        const targetChunk = cards.length > 0 ? cards[0][0] : html;
+        
+        let targetChunk: string | null = null;
+        let matchTituloFinal: RegExpMatchArray | null = null;
 
-        const matchPreco = targetChunk.match(/class="[^"]*andes-money-amount__fraction[^"]*"[^>]*>([\d\.]+)/);
-        const matchCents = targetChunk.match(/class="[^"]*andes-money-amount__cents[^"]*"[^>]*>([\d]+)/);
-        const matchLink = targetChunk.match(/href="(https:\/\/[^"]*(?:mercadolivre\.com\.br\/[^\/]+\/up\/MLBU|produto\.mercadolivre\.com\.br\/MLB-|mercadolivre\.com\.br\/p\/MLB)[^"]*)"/);
-        const matchTitulo =
-          targetChunk.match(/class="[^"]*(?:poly-component__title|ui-search-item__title)[^"]*"[^>]*><a[^>]*>([^<]+)<\/a>/) ||
-          targetChunk.match(/class="[^"]*(?:poly-component__title|ui-search-item__title)[^"]*"[^>]*>([^<]+)</) ||
-          targetChunk.match(/<h2[^>]*class="[^"]*poly-box[^"]*"[^>]*><a[^>]*>([^<]+)<\/a>/);
-        const matchThumb = targetChunk.match(/(?:src|data-src)="(https:\/\/[^"]*(?:http2\.mlstatic\.com\/D_[^"]*))"/);
+        for (const card of cards) {
+          const chunk = card[0];
+          const matchTitulo =
+            chunk.match(/class="[^"]*(?:poly-component__title|ui-search-item__title)[^"]*"[^>]*><a[^>]*>([^<]+)<\/a>/) ||
+            chunk.match(/class="[^"]*(?:poly-component__title|ui-search-item__title)[^"]*"[^>]*>([^<]+)</) ||
+            chunk.match(/<h2[^>]*class="[^"]*poly-box[^"]*"[^>]*><a[^>]*>([^<]+)<\/a>/);
+          const tituloCard = matchTitulo ? matchTitulo[1].trim() : "";
+          if (isTituloCompativel(tituloCard, veiculoDetectado)) {
+            targetChunk = chunk;
+            matchTituloFinal = matchTitulo;
+            break;
+          }
+        }
 
-        if (matchPreco) {
-          const valorFormatado = matchPreco[1].replace(/\./g, "");
-          const centavos = matchCents ? matchCents[1] : "00";
-          const precoNumerico = parseFloat(`${valorFormatado}.${centavos}`);
+        if (targetChunk) {
+          const matchPreco = targetChunk.match(/class="[^"]*andes-money-amount__fraction[^"]*"[^>]*>([\d\.]+)/);
+          const matchCents = targetChunk.match(/class="[^"]*andes-money-amount__cents[^"]*"[^>]*>([\d]+)/);
+          const matchLink = targetChunk.match(/href="(https:\/\/[^"]*(?:mercadolivre\.com\.br\/[^\/]+\/up\/MLBU|produto\.mercadolivre\.com\.br\/MLB-|mercadolivre\.com\.br\/p\/MLB)[^"]*)"/);
+          const matchThumb = targetChunk.match(/(?:src|data-src)="(https:\/\/[^"]*(?:http2\.mlstatic\.com\/D_[^"]*))"/);
 
-          if (precoNumerico > 0) {
-            const rawLink = matchLink
-              ? matchLink[1].replace(/&amp;/g, "&")
-              : `https://lista.mercadolivre.com.br/${encodeURIComponent(queryLimpa)}`;
-            const cleanLink = rawLink.split("#")[0].split("?")[0];
-            const linkAfiliado = formatarLinkAfiliado(cleanLink);
-            const thumb = matchThumb ? obterImagemAltaResolucao(matchThumb[1]) : null;
+          if (matchPreco) {
+            const valorFormatado = matchPreco[1].replace(/\./g, "");
+            const centavos = matchCents ? matchCents[1] : "00";
+            const precoNumerico = parseFloat(`${valorFormatado}.${centavos}`);
 
-            return {
-              preco: precoNumerico,
-              preco_formatado: formatarPrecoBRL(precoNumerico),
-              link: linkAfiliado,
-              marca: deduzirMarca(matchTitulo?.[1]) || "Original / Homologada",
-              titulo: matchTitulo ? matchTitulo[1].trim() : queryLimpa,
-              tem_full:
-                targetChunk.includes("full-badge") ||
-                targetChunk.includes("Envio Full") ||
-                targetChunk.includes("poly-component__fulfillment"),
-              thumbnail: thumb,
-            };
+            if (precoNumerico > 0) {
+              const rawLink = matchLink
+                ? matchLink[1].replace(/&amp;/g, "&")
+                : `https://lista.mercadolivre.com.br/${encodeURIComponent(queryLimpa)}`;
+              const cleanLink = rawLink.split("#")[0].split("?")[0];
+              const linkAfiliado = formatarLinkAfiliado(cleanLink);
+              const thumb = matchThumb ? obterImagemAltaResolucao(matchThumb[1]) : null;
+
+              return {
+                preco: precoNumerico,
+                preco_formatado: formatarPrecoBRL(precoNumerico),
+                link: linkAfiliado,
+                marca: deduzirMarca(matchTituloFinal?.[1]) || "Original / Homologada",
+                titulo: matchTituloFinal ? matchTituloFinal[1].trim() : queryLimpa,
+                tem_full:
+                  targetChunk.includes("full-badge") ||
+                  targetChunk.includes("Envio Full") ||
+                  targetChunk.includes("poly-component__fulfillment"),
+                thumbnail: thumb,
+              };
+            }
           }
         }
       }

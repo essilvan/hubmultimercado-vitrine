@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { buscarPrecoMercadoLivre, type OfertaRealML } from "@/lib/mercadolivre";
+import { buscarPrecoMercadoLivre, isTituloCompativel, type OfertaRealML } from "@/lib/mercadolivre";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -65,7 +65,7 @@ Diretrizes Críticas:
 
 3. ANTI-ALUCINAÇÃO E CONFIANÇA:
    - Se uma palavra estiver ilegível, borrada ou ambígua, NUNCA invente uma peça. Defina "confianca" como "baixa" ou "media" e marque "requer_confirmacao": true.
-   - Gere no campo "termo_busca_mercadolivre" uma query de busca enxuta e cirúrgica, combinando apenas: [Nome Padronizado] + [Modelo] + [Motor/Ano] + [Posição/Lado se houver]. Não inclua stop-words nem frases compridas.
+   - Gere no campo "termo_busca_mercadolivre" uma query de busca SEMPRE prefixando o modelo, motorização e ano do carro: [Modelo] + [Motor] + [Ano] + [Nome Padronizado] + [Posição]. Exemplo: "Gol 1.6 2012 Kit de Embreagem". Não inclua stop-words nem frases compridas.
 
 4. SAÍDA OBRIGATÓRIA:
    - Retorne exclusivamente o objeto JSON validado conforme o schema fornecido. Não inclua estimativas de preços ou textos adicionais.`;
@@ -124,65 +124,105 @@ export type { OfertaRealML };
 async function sincronizarPrecosReais(orcamento: OrcamentoResposta): Promise<OrcamentoResposta> {
   if (!orcamento?.itens || orcamento.itens.length === 0) return orcamento;
 
+  const veiculo = orcamento.veiculo || {
+    marca: null,
+    modelo: null,
+    ano: null,
+    motorizacao: null,
+    placa: null,
+  };
+
   // Formata veiculo_detectado com antecedência para passar para as buscas de preços reais
-  if (!orcamento.veiculo_detectado && orcamento.veiculo) {
-    const { marca, modelo, motorizacao, ano } = orcamento.veiculo;
-    const partes = [marca, modelo, motorizacao, ano].filter(Boolean);
+  if (!orcamento.veiculo_detectado) {
+    const partes = [veiculo.marca, veiculo.modelo, veiculo.motorizacao, veiculo.ano].filter(Boolean);
     orcamento.veiculo_detectado = partes.length > 0 ? partes.join(" ") : "Veículo Detectado";
   }
 
-  const veiculoNome = orcamento.veiculo_detectado || (orcamento.veiculo?.modelo ?? "");
+  const modeloCarro = veiculo.modelo || "";
+  const motorCarro = veiculo.motorizacao || "";
+  const anoCarro = veiculo.ano || "";
+  const veiculoNome = orcamento.veiculo_detectado || modeloCarro;
 
   await Promise.all(
     orcamento.itens.map(async (item) => {
       // Normalização de campos de compatibilidade
       if (!item.nome_peca) item.nome_peca = item.peca_padronizada;
-      if (!item.query_busca) item.query_busca = item.termo_busca_mercadolivre;
       if (!item.marca_recomendada)
         item.marca_recomendada = item.marca_preferencial || "Original / Homologada";
 
-      const termoBusca =
-        item.termo_busca_mercadolivre || item.query_busca || item.peca_padronizada;
-      const oferta = await buscarPrecoMercadoLivre(termoBusca, veiculoNome);
+      // OBRIGATÓRIO: A montagem da query de busca SEMPRE deve prefixar o modelo, motorização e ano do carro.
+      // Exemplo correto: `${veiculo.modelo} ${veiculo.motorizacao || ''} ${veiculo.ano || ''} ${item.peca_padronizada} ${item.posicao || ''}`.trim()
+      const peca = item.peca_padronizada || item.nome_peca || item.termo_lido || "";
+      const pos = item.posicao || "";
 
-      if (oferta) {
-        // Campos explícitos obrigatórios do formato de retorno
-        item.preco = oferta.preco;
-        item.preco_formatado = oferta.preco_formatado;
+      let queryObrigatoria = `${modeloCarro} ${motorCarro} ${anoCarro} ${peca} ${pos}`
+        .replace(/\s+/g, " ")
+        .trim();
+
+      if (!queryObrigatoria) {
+        queryObrigatoria = peca;
+      }
+
+      item.termo_busca_mercadolivre = queryObrigatoria;
+      item.query_busca = queryObrigatoria;
+
+      let oferta = await buscarPrecoMercadoLivre(queryObrigatoria, veiculoNome);
+
+      // Filtro de compatibilidade no retorno da busca: se o título contiver palavras de modelos concorrentes/incompatíveis,
+      // descarta esse resultado e tenta uma busca mais restrita ou descarta a oferta
+      if (oferta && !isTituloCompativel(oferta.titulo, modeloCarro || veiculoNome)) {
+        console.warn(`[Incompatível descartado]: Anúncio "${oferta.titulo}" para carro "${veiculoNome}". Tentando busca restrita...`);
+        const buscaRestrita = `"${modeloCarro}" ${peca}`.trim();
+        const ofertaRestrita = await buscarPrecoMercadoLivre(buscaRestrita, veiculoNome);
+        if (ofertaRestrita && isTituloCompativel(ofertaRestrita.titulo, modeloCarro || veiculoNome)) {
+          oferta = ofertaRestrita;
+        } else {
+          // Descarte por incompatibilidade confirmada
+          oferta = null as any;
+        }
+      }
+
+      if (oferta && typeof oferta.preco === "number" && oferta.preco > 0) {
+        const precoNum = Number(oferta.preco);
+        const precoFormatado = new Intl.NumberFormat("pt-BR", {
+          style: "currency",
+          currency: "BRL",
+        }).format(Number(precoNum.toFixed(2)));
+
+        item.preco = precoNum;
+        item.preco_formatado = precoFormatado;
         item.link = oferta.link;
         item.marca = oferta.marca;
 
         // Campos complementares e legados para compatibilidade total
-        item.preco_real_ml = oferta.preco;
-        item.preco_medio = oferta.preco_formatado;
-        item.preco_medio_estimado = oferta.preco_formatado;
+        item.preco_real_ml = precoNum;
+        item.preco_medio = precoFormatado;
+        item.preco_medio_estimado = precoFormatado;
         item.titulo_anuncio = oferta.titulo;
         item.link_anuncio = oferta.link;
         item.link_direto_anuncio = oferta.link;
         item.tem_full = oferta.tem_full;
         item.thumbnail = oferta.thumbnail;
-        item.preco_original = oferta.original_price;
+        item.preco_original = oferta.original_price ? Number(oferta.original_price) : null;
         item.preco_real = true;
       }
     })
   );
 
-  // Recalcula o total_estimado somando estritamente os PREÇOS REAIS encontrados
-  let totalNum = 0;
-  let pecasComPreco = 0;
-  for (const it of orcamento.itens) {
-    const p = it.preco ?? it.preco_real_ml;
-    if (typeof p === "number" && p > 0) {
-      totalNum += p * (it.quantidade || 1);
-      pecasComPreco++;
-    }
-  }
+  // Recalcula o total_estimado somando estritamente os subtotais:
+  // subtotal = (Number(item.quantidade) || 1) * (Number(item.preco) || 0)
+  // itens.reduce((acc, item) => acc + ((Number(item.quantidade) || 1) * (Number(item.preco) || 0)), 0)
+  const totalNum = (orcamento.itens || []).reduce((acc, it) => {
+    const preco = Number(it.preco ?? it.preco_real_ml) || 0;
+    const qtd = Number(it.quantidade) || 1;
+    return acc + (qtd * preco);
+  }, 0);
 
-  if (pecasComPreco > 0 && totalNum > 0) {
-    orcamento.total_estimado = totalNum.toLocaleString("pt-BR", {
+  if (totalNum > 0) {
+    orcamento.total_estimado = new Intl.NumberFormat("pt-BR", {
       style: "currency",
       currency: "BRL",
-    });
+    }).format(Number(totalNum.toFixed(2)));
   } else {
     orcamento.total_estimado = "Sob Consulta";
   }
@@ -290,7 +330,7 @@ function extrairFallbackInteligente(texto: string): OrcamentoResposta {
       quantidade: 2,
       posicao: "Dianteiro",
       marca_preferencial: "Nakata",
-      termo_busca_mercadolivre: `Amortecedor Dianteiro ${modelo} ${ano || ""} Par`.trim(),
+      termo_busca_mercadolivre: `${modelo} ${motorizacao} ${ano || ""} Amortecedor Dianteiro Par`.trim(),
       confianca: "alta",
       requer_confirmacao: false,
     });
@@ -303,7 +343,7 @@ function extrairFallbackInteligente(texto: string): OrcamentoResposta {
       quantidade: 1,
       posicao: "Dianteiro",
       marca_preferencial: "Cobreq",
-      termo_busca_mercadolivre: `Jogo Pastilha Freio ${modelo} Dianteira`.trim(),
+      termo_busca_mercadolivre: `${modelo} ${motorizacao} ${ano || ""} Jogo Pastilha Freio Dianteira`.trim(),
       confianca: "alta",
       requer_confirmacao: false,
     });
@@ -316,7 +356,7 @@ function extrairFallbackInteligente(texto: string): OrcamentoResposta {
       quantidade: 2,
       posicao: "Dianteiro",
       marca_preferencial: "Fremax",
-      termo_busca_mercadolivre: `Par Disco Freio Ventilado ${modelo}`.trim(),
+      termo_busca_mercadolivre: `${modelo} ${motorizacao} ${ano || ""} Par Disco Freio Ventilado`.trim(),
       confianca: "alta",
       requer_confirmacao: false,
     });
@@ -329,7 +369,7 @@ function extrairFallbackInteligente(texto: string): OrcamentoResposta {
       quantidade: 1,
       posicao: null,
       marca_preferencial: "LuK",
-      termo_busca_mercadolivre: `Kit Embreagem ${modelo} LuK`.trim(),
+      termo_busca_mercadolivre: `${modelo} ${motorizacao} ${ano || ""} Kit Embreagem LuK`.trim(),
       confianca: "alta",
       requer_confirmacao: false,
     });
@@ -342,7 +382,7 @@ function extrairFallbackInteligente(texto: string): OrcamentoResposta {
       quantidade: 1,
       posicao: null,
       marca_preferencial: "NGK",
-      termo_busca_mercadolivre: `Jogo Velas Ignicao ${modelo} NGK`.trim(),
+      termo_busca_mercadolivre: `${modelo} ${motorizacao} ${ano || ""} Jogo Velas Ignicao NGK`.trim(),
       confianca: "alta",
       requer_confirmacao: false,
     });
@@ -355,7 +395,7 @@ function extrairFallbackInteligente(texto: string): OrcamentoResposta {
       quantidade: 1,
       posicao: null,
       marca_preferencial: "Contitech",
-      termo_busca_mercadolivre: `Kit Correia Dentada Tensor ${modelo}`.trim(),
+      termo_busca_mercadolivre: `${modelo} ${motorizacao} ${ano || ""} Kit Correia Dentada Tensor`.trim(),
       confianca: "alta",
       requer_confirmacao: false,
     });
@@ -368,7 +408,7 @@ function extrairFallbackInteligente(texto: string): OrcamentoResposta {
       quantidade: 1,
       posicao: null,
       marca_preferencial: "Mann-Filter",
-      termo_busca_mercadolivre: `Filtro Oleo ${modelo} Mann`.trim(),
+      termo_busca_mercadolivre: `${modelo} ${motorizacao} ${ano || ""} Filtro Oleo Mann`.trim(),
       confianca: "alta",
       requer_confirmacao: false,
     });
@@ -381,7 +421,7 @@ function extrairFallbackInteligente(texto: string): OrcamentoResposta {
       quantidade: 1,
       posicao: null,
       marca_preferencial: "Nakata",
-      termo_busca_mercadolivre: `Pecas ${termoCarro}`.trim(),
+      termo_busca_mercadolivre: `${modelo} ${motorizacao} ${ano || ""} Pecas Revisao`.trim(),
       confianca: "media",
       requer_confirmacao: true,
     });
@@ -410,7 +450,10 @@ export async function POST(request: NextRequest) {
     const texto = formData.get("texto") as string | null;
     const imagem = formData.get("imagem") as File | null;
 
-    if (!texto?.trim() && (!imagem || imagem.size === 0)) {
+    const temTexto = Boolean(texto && texto.trim().length > 0);
+    const temImagem = Boolean(imagem && typeof imagem.size === "number" && imagem.size > 0);
+
+    if (!temTexto && !temImagem) {
       return NextResponse.json(
         {
           success: false,
@@ -420,7 +463,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+    const apiKey = (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || "").trim();
 
     // Se a chave Gemini não estiver configurada no .env.local, usa o fallback inteligente
     if (!apiKey) {
@@ -434,11 +477,12 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // Prepara as partes do payload multimodal para o Gemini
+    // Prepara as partes do payload para o Gemini
     const parts: Array<Record<string, unknown>> = [];
 
-    // Se houver imagem anexada, converte para base64 inlineData
-    if (imagem && imagem.size > 0) {
+    // Se o input for apenas TEXTO (sem arquivo de foto), envie diretamente como prompt de texto para o modelo do Gemini,
+    // sem tentar processar inlineData/base64 de imagem vazia.
+    if (temImagem && imagem) {
       const buffer = Buffer.from(await imagem.arrayBuffer());
       const base64Data = buffer.toString("base64");
       const mimeType = imagem.type || "image/jpeg";
@@ -449,16 +493,16 @@ export async function POST(request: NextRequest) {
           data: base64Data,
         },
       });
-    }
 
-    // Se houver texto enviado pelo cliente
-    if (texto?.trim()) {
       parts.push({
-        text: `Orçamento mecânico fornecido pelo cliente:\n${texto.trim()}`,
+        text: temTexto
+          ? `Orçamento mecânico fornecido pelo cliente:\n${texto!.trim()}`
+          : "Transcreva, higienize e estruture com precisão todas as peças deste orçamento mecânico.",
       });
-    } else if (parts.length > 0) {
+    } else {
+      // Input exclusivamente de TEXTO
       parts.push({
-        text: "Transcreva, higienize e estruture com precisão todas as peças deste orçamento mecânico.",
+        text: `Orçamento mecânico fornecido pelo cliente:\n${texto!.trim()}`,
       });
     }
 
@@ -478,10 +522,11 @@ export async function POST(request: NextRequest) {
       },
     };
 
-    // Modelos suportados na API v1beta (gemini-flash-latest ativo)
+    // Chamada aos modelos Gemini com 'gemini-2.0-flash' e 'gemini-1.5-pro'
     const modelsToTry = [
       process.env.GEMINI_MODEL,
-      "gemini-flash-latest",
+      "gemini-2.0-flash",
+      "gemini-1.5-pro",
     ].filter(Boolean) as string[];
 
     let rawContent: string | null = null;
@@ -489,35 +534,42 @@ export async function POST(request: NextRequest) {
 
     for (const model of modelsToTry) {
       try {
+        console.log(`[Gemini Request] Tentando modelo: ${model}`);
         const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
 
         const geminiRes = await fetch(geminiUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(geminiBody),
-          signal: AbortSignal.timeout(15000),
+          signal: AbortSignal.timeout(25000),
         });
 
         if (geminiRes.ok) {
           const geminiData = await geminiRes.json();
           const candidate = geminiData.candidates?.[0];
           rawContent = candidate?.content?.parts?.[0]?.text || null;
-          if (rawContent) break;
+          if (rawContent) {
+            console.log(`[Gemini Sucesso] Resposta obtida via modelo: ${model}`);
+            break;
+          } else {
+            console.warn(`[Gemini Aviso] Modelo ${model} retornou sem parts de texto válidas.`);
+          }
         } else {
           lastError = await geminiRes.text();
-          console.error(`Erro Gemini (modelo ${model} - status ${geminiRes.status}):`, lastError);
+          console.error(`[ERRO GEMINI API] Modelo ${model} falhou com status ${geminiRes.status}:`, lastError);
         }
       } catch (err) {
-        lastError = err instanceof Error ? err.message : String(err);
-        console.error(`Erro Gemini (conexão com ${model}):`, lastError);
+        lastError = err instanceof Error ? `${err.name}: ${err.message}\n${err.stack || ""}` : String(err);
+        console.error(`[ERRO GEMINI CATCH] Falha durante requisição para o modelo ${model}:`, lastError);
       }
     }
 
     if (!rawContent) {
-      console.error("Erro Gemini: Todos os modelos disponíveis falharam.", lastError);
+      console.error("[ERRO CRÍTICO GEMINI] Todos os modelos Gemini falharam. Mensagem detalhada:", lastError);
 
-      if (texto?.trim()) {
-        const fallbackResult = extrairFallbackInteligente(texto);
+      if (temTexto) {
+        console.warn("[FALLBACK LOCAL ATIVADO] Acionando inferência local devido a falha da API Gemini.");
+        const fallbackResult = extrairFallbackInteligente(texto!);
         const orcamentoAtualizado = await sincronizarPrecosReais(fallbackResult);
         return NextResponse.json({
           success: true,
@@ -545,8 +597,8 @@ export async function POST(request: NextRequest) {
       data: orcamentoComPrecosReais,
     });
   } catch (err: unknown) {
-    console.error("Erro Gemini:", err);
-    console.error("Erro no processamento do orçamento:", err);
+    const stackTrace = err instanceof Error ? `${err.name}: ${err.message}\n${err.stack || ""}` : String(err);
+    console.error("[ERRO PROCESSAMENTO ORÇAMENTO CATCH]:", stackTrace);
     const msg =
       err instanceof Error ? err.message : "Erro desconhecido ao processar orçamento com IA.";
     return NextResponse.json({ success: false, error: msg }, { status: 500 });

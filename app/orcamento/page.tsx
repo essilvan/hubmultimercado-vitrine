@@ -82,6 +82,18 @@ const EXEMPLOS_PRONTOS = [
 ];
 
 /**
+ * Formata valores monetários estritamente com 2 casas decimais e moeda BRL
+ */
+function formatarMoeda(valor: number): string {
+  const num = Number(valor);
+  if (isNaN(num)) return "R$ 0,00";
+  return new Intl.NumberFormat("pt-BR", {
+    style: "currency",
+    currency: "BRL",
+  }).format(Number(num.toFixed(2)));
+}
+
+/**
  * Gera uma busca consolidada de kit completo para o Mercado Livre
  */
 function gerarQueryKitCompleto(resultado: OrcamentoResultado): string {
@@ -252,21 +264,25 @@ export default function OrcamentoPage() {
     }
   };
 
-  // Recálculo dinâmico baseado estritamente nos itens selecionados com preços reais do Mercado Livre
+  // Recálculo dinâmico baseado estritamente na multiplicação da quantidade pelo preço real de cada item
+  const totalGeral = (resultado?.itens || []).reduce((acc, item) => {
+    const qtd = Number(item.quantidade) || 1;
+    const preco = Number(item.preco ?? item.preco_real_ml) || 0;
+    return acc + (qtd * preco);
+  }, 0);
+
   const totalSelecionado = (resultado?.itens || []).reduce((acc, item, idx) => {
     if (!itensSelecionados.includes(idx)) return acc;
-    const preco = item.preco ?? item.preco_real_ml ?? 0;
-    const qtd = item.quantidade || 1;
-    return acc + preco * qtd;
+    const qtd = Number(item.quantidade) || 1;
+    const preco = Number(item.preco ?? item.preco_real_ml) || 0;
+    return acc + (qtd * preco);
   }, 0);
 
   const totalFormatado =
-    totalSelecionado > 0
-      ? totalSelecionado.toLocaleString("pt-BR", {
-          style: "currency",
-          currency: "BRL",
-        })
-      : "Sob Consulta";
+    totalSelecionado > 0 ? formatarMoeda(totalSelecionado) : "Sob Consulta";
+
+  const totalGeralFormatado =
+    totalGeral > 0 ? formatarMoeda(totalGeral) : "Sob Consulta";
 
   const handleToggleItem = (idx: number) => {
     setItensSelecionados((prev) =>
@@ -302,23 +318,21 @@ export default function OrcamentoPage() {
       textoMsg += `(Nenhuma peça selecionada)\n`;
     } else {
       itensParaEnviar.forEach((item, index) => {
-        const qtd = item.quantidade && item.quantidade > 1 ? `${item.quantidade}x ` : "1x ";
+        const qtd = Number(item.quantidade) || 1;
         const pos = item.posicao ? ` (${item.posicao})` : "";
         const marca =
           item.marca_preferencial || item.marca_recomendada
             ? ` - Marca: ${item.marca_preferencial || item.marca_recomendada}`
             : "";
-        const precoNum = item.preco ?? item.preco_real_ml;
-        const precoUnit =
-          item.preco_formatado ||
-          (precoNum
-            ? precoNum.toLocaleString("pt-BR", { style: "currency", currency: "BRL" })
-            : "");
-        const precoTxt = precoUnit ? ` - ${precoUnit}` : "";
-        const link = item.link_anuncio || item.link_direto_anuncio;
+        const precoNum = Number(item.preco ?? item.preco_real_ml) || 0;
+        const subtotal = qtd * precoNum;
+        const precoTxt = precoNum > 0
+          ? (qtd > 1 ? ` - ${qtd}x de ${formatarMoeda(precoNum)} = ${formatarMoeda(subtotal)}` : ` - ${formatarMoeda(precoNum)}`)
+          : "";
+        const link = item.link_anuncio || item.link_direto_anuncio || item.link;
         const linkTxt = link ? `\n   🔗 ${link}` : "";
 
-        textoMsg += `${index + 1}. *${qtd}${item.peca_padronizada || item.nome_peca}*${pos}${marca}${precoTxt}${linkTxt}\n`;
+        textoMsg += `${index + 1}. *${qtd > 1 ? `${qtd}x ` : "1x "}${item.peca_padronizada || item.nome_peca}*${pos}${marca}${precoTxt}${linkTxt}\n`;
       });
     }
 
@@ -686,7 +700,7 @@ Peças:
                 <div>
                   <span className="text-xs text-zinc-400 block font-medium">Total com Preços Reais ML</span>
                   <span className="text-3xl font-black text-emerald-400 font-mono block mt-0.5">
-                    {totalSelecionado > 0 ? totalFormatado : (resultado.total_estimado || "Sob Consulta")}
+                    {totalSelecionado > 0 ? totalFormatado : (totalGeral > 0 ? totalGeralFormatado : (resultado.total_estimado || "Sob Consulta"))}
                   </span>
                   <span className="text-[11px] text-zinc-400 mt-1 block">
                     Preços reais sincronizados do Mercado Livre
@@ -862,20 +876,31 @@ Peças:
 
                           {/* 3. Preço Real do Mercado Livre */}
                           <td className="py-4 px-6 align-middle text-right">
-                            <span className="font-mono font-black text-emerald-600 dark:text-emerald-400 text-sm block">
-                              {item.preco_formatado ||
-                                ((item.preco ?? item.preco_real_ml)
-                                  ? (item.preco ?? item.preco_real_ml)!.toLocaleString("pt-BR", {
-                                      style: "currency",
-                                      currency: "BRL",
-                                    })
-                                  : item.preco_medio || "Sob Consulta")}
-                            </span>
-                            {((item.preco ?? item.preco_real_ml) && (item.preco ?? item.preco_real_ml)! > 0) ? (
-                              <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-700 dark:text-emerald-300 bg-emerald-100 dark:bg-emerald-950/80 px-2 py-0.5 rounded-full border border-emerald-300 dark:border-emerald-800/80 mt-1">
-                                ✓ Preço Real ML
-                              </span>
-                            ) : null}
+                            {(() => {
+                              const qtd = Number(item.quantidade) || 1;
+                              const precoUnit = Number(item.preco ?? item.preco_real_ml) || 0;
+                              const subtotal = qtd * precoUnit;
+
+                              return (
+                                <>
+                                  <span className="font-mono font-black text-emerald-600 dark:text-emerald-400 text-sm block">
+                                    {subtotal > 0
+                                      ? formatarMoeda(subtotal)
+                                      : (item.preco_formatado || item.preco_medio || "Sob Consulta")}
+                                  </span>
+                                  {qtd > 1 && precoUnit > 0 ? (
+                                    <span className="text-[11px] text-zinc-400 block">
+                                      {qtd}x de {formatarMoeda(precoUnit)}
+                                    </span>
+                                  ) : null}
+                                  {precoUnit > 0 ? (
+                                    <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-700 dark:text-emerald-300 bg-emerald-100 dark:bg-emerald-950/80 px-2 py-0.5 rounded-full border border-emerald-300 dark:border-emerald-800/80 mt-1">
+                                      ✓ Preço Real ML
+                                    </span>
+                                  ) : null}
+                                </>
+                              );
+                            })()}
                           </td>
 
                           {/* 4. Botão de Compra / Ver no ML */}
@@ -1119,24 +1144,26 @@ Peças:
                       {/* Preço e Botão Individual Comprar / Ver no ML */}
                       <div className="flex sm:flex-col items-center sm:items-end justify-between sm:justify-center gap-2 pl-8 sm:pl-0 shrink-0">
                         <div className="text-right">
-                          <span className="text-base font-black font-mono text-emerald-600 dark:text-emerald-400 block leading-tight">
-                            {item.preco_formatado ||
-                              ((item.preco ?? item.preco_real_ml)
-                                ? (item.preco ?? item.preco_real_ml)!.toLocaleString("pt-BR", {
-                                    style: "currency",
-                                    currency: "BRL",
-                                  })
-                                : "Sob Consulta")}
-                          </span>
-                          {item.quantidade && item.quantidade > 1 && (item.preco ?? item.preco_real_ml) ? (
-                            <span className="text-[10px] text-zinc-400 block">
-                              Total:{" "}
-                              {((item.preco ?? item.preco_real_ml)! * item.quantidade).toLocaleString("pt-BR", {
-                                style: "currency",
-                                currency: "BRL",
-                              })}
-                            </span>
-                          ) : null}
+                          {(() => {
+                            const qtd = Number(item.quantidade) || 1;
+                            const precoUnit = Number(item.preco ?? item.preco_real_ml) || 0;
+                            const subtotal = qtd * precoUnit;
+
+                            return (
+                              <>
+                                <span className="text-base font-black font-mono text-emerald-600 dark:text-emerald-400 block leading-tight">
+                                  {subtotal > 0
+                                    ? formatarMoeda(subtotal)
+                                    : (item.preco_formatado || "Sob Consulta")}
+                                </span>
+                                {qtd > 1 && precoUnit > 0 ? (
+                                  <span className="text-[10px] text-zinc-400 block">
+                                    {qtd}x de {formatarMoeda(precoUnit)}
+                                  </span>
+                                ) : null}
+                              </>
+                            );
+                          })()}
                         </div>
 
                         <a
