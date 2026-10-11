@@ -1,7 +1,8 @@
 import { MetadataRoute } from "next";
 import { supabase } from "@/lib/supabase";
 
-export const revalidate = 3600; // Revalidação a cada 1 hora para inclusão automática de novos produtos
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
   const baseUrl = (
@@ -24,37 +25,37 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
     },
   ];
 
-  // 2. Busca todos os produtos ativos que possuam slug no Supabase (limite ampliado para 1000)
+  // 2. Consulta Completa ao Supabase com limite ampliado para garantir todos os produtos
   try {
     const { data: produtos, error } = await supabase
       .from("produtos_afiliados")
-      .select("slug, updated_at, created_at")
+      .select("slug, updated_at")
       .not("slug", "is", null)
-      .limit(1000);
+      .limit(2000);
 
     if (!error && produtos && Array.isArray(produtos)) {
       for (const prod of produtos) {
-        const cleanSlug = prod.slug?.trim();
+        if (!prod.slug) continue;
+        const cleanSlug = prod.slug.trim();
         if (!cleanSlug) continue;
 
-        let lastModDate: Date;
+        let lastModifiedDate: Date;
         try {
-          lastModDate =
-            prod.updated_at || prod.created_at
-              ? new Date(prod.updated_at || prod.created_at)
-              : new Date();
-          if (isNaN(lastModDate.getTime())) lastModDate = new Date();
+          lastModifiedDate = prod.updated_at ? new Date(prod.updated_at) : new Date();
+          if (isNaN(lastModifiedDate.getTime())) lastModifiedDate = new Date();
         } catch {
-          lastModDate = new Date();
+          lastModifiedDate = new Date();
         }
 
         routes.push({
-          url: `${baseUrl}/peca/${cleanSlug}`,
-          lastModified: lastModDate,
+          url: `https://hubmultimercado-vitrine.vercel.app/peca/${cleanSlug}`,
+          lastModified: lastModifiedDate,
           changeFrequency: "daily",
           priority: 0.8,
         });
       }
+    } else if (error) {
+      console.error("Erro ao consultar produtos no Supabase para sitemap:", error.message);
     }
   } catch (err) {
     console.error("Falha ao consultar produtos para o sitemap:", err);
