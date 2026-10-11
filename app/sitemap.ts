@@ -1,66 +1,50 @@
-import { MetadataRoute } from "next";
-import { supabase } from "@/lib/supabase";
+import { MetadataRoute } from 'next';
+import { createClient } from '@supabase/supabase-js';
 
-export const dynamic = "force-dynamic";
+// 1. Força a rota a ser executada sempre dinamicamente no servidor
+export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
 export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
-  const baseUrl = (
-    process.env.NEXT_PUBLIC_SITE_URL || "https://hubmultimercado-vitrine.vercel.app"
-  ).replace(/\/+$/, "");
+  const baseUrl = 'https://hubmultimercado-vitrine.vercel.app';
 
-  // 1. Rotas estáticas principais
-  const routes: MetadataRoute.Sitemap = [
+  // 2. Inicializa o Supabase diretamente na rota do sitemap
+  const supabase = createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  );
+
+  // 3. Procura TODOS os produtos sem limite restritivo
+  const { data: produtos, error } = await supabase
+    .from('produtos_afiliados')
+    .select('slug, updated_at')
+    .not('slug', 'is', null)
+    .range(0, 1000);
+
+  if (error) {
+    console.error('[ERRO SITEMAP SUPABASE]:', error);
+  }
+
+  const produtosUrls: MetadataRoute.Sitemap = (produtos || []).map((item) => ({
+    url: `${baseUrl}/peca/${item.slug}`,
+    lastModified: item.updated_at ? new Date(item.updated_at) : new Date(),
+    changeFrequency: 'daily',
+    priority: 0.8,
+  }));
+
+  return [
     {
-      url: `${baseUrl}`,
+      url: baseUrl,
       lastModified: new Date(),
-      changeFrequency: "daily",
+      changeFrequency: 'daily',
       priority: 1.0,
     },
     {
       url: `${baseUrl}/orcamento`,
       lastModified: new Date(),
-      changeFrequency: "weekly",
+      changeFrequency: 'weekly',
       priority: 0.9,
     },
+    ...produtosUrls,
   ];
-
-  // 2. Consulta Completa ao Supabase com limite ampliado para garantir todos os produtos
-  try {
-    const { data: produtos, error } = await supabase
-      .from("produtos_afiliados")
-      .select("slug, updated_at")
-      .not("slug", "is", null)
-      .limit(2000);
-
-    if (!error && produtos && Array.isArray(produtos)) {
-      for (const prod of produtos) {
-        if (!prod.slug) continue;
-        const cleanSlug = prod.slug.trim();
-        if (!cleanSlug) continue;
-
-        let lastModifiedDate: Date;
-        try {
-          lastModifiedDate = prod.updated_at ? new Date(prod.updated_at) : new Date();
-          if (isNaN(lastModifiedDate.getTime())) lastModifiedDate = new Date();
-        } catch {
-          lastModifiedDate = new Date();
-        }
-
-        routes.push({
-          url: `https://hubmultimercado-vitrine.vercel.app/peca/${cleanSlug}`,
-          lastModified: lastModifiedDate,
-          changeFrequency: "daily",
-          priority: 0.8,
-        });
-      }
-    } else if (error) {
-      console.error("Erro ao consultar produtos no Supabase para sitemap:", error.message);
-    }
-  } catch (err) {
-    console.error("Falha ao consultar produtos para o sitemap:", err);
-  }
-
-  return routes;
 }
-
