@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { buscarPrecoMercadoLivre, type OfertaRealML } from "@/lib/mercadolivre";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -22,12 +23,14 @@ export interface ItemOrcamento {
   requer_confirmacao: boolean;
 
   // Preço REAL do Mercado Livre (nunca estimado por IA)
+  preco?: number | null;
   preco_real_ml?: number | null;
   preco_formatado?: string | null;
   titulo_anuncio?: string | null;
   link_anuncio?: string | null;
   tem_full?: boolean;
   thumbnail?: string | null;
+  preco_original?: number | null;
 
   // Campos legados para compatibilidade
   preco_medio_estimado?: string;
@@ -111,137 +114,7 @@ const RESPONSE_SCHEMA = {
   required: ["veiculo", "itens"],
 };
 
-export interface OfertaRealML {
-  preco: number;
-  preco_formatado: string;
-  titulo: string;
-  link: string;
-  tem_full: boolean;
-  thumbnail: string | null;
-}
-
-/**
- * Consulta o preço real e atualizado diretamente de anúncios públicos do Mercado Livre
- */
-async function buscarPrecoMercadoLivre(termoBusca: string): Promise<OfertaRealML | null> {
-  if (!termoBusca || !termoBusca.trim()) return null;
-
-  try {
-    const url = `https://lista.mercadolivre.com.br/${encodeURIComponent(termoBusca)}_OrderId_PRICE_ASC_NoIndex_True`;
-
-    let res = await fetch(url, {
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
-      },
-      next: { revalidate: 3600 },
-      signal: AbortSignal.timeout(6000),
-    });
-
-    let html = res.ok ? await res.text() : "";
-
-    // Se o Mercado Livre retornar desafio de tráfego suspeito na Vercel/datacenter, utiliza crawler social verificado
-    if (!res.ok || html.includes("suspicious-traffic") || !html.includes("andes-money-amount")) {
-      const fallbackRes = await fetch(url, {
-        headers: {
-          "User-Agent": "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
-          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-          "Accept-Language": "pt-BR,pt;q=0.9",
-        },
-        next: { revalidate: 3600 },
-        signal: AbortSignal.timeout(6000),
-      });
-
-      if (fallbackRes.ok) {
-        html = await fallbackRes.text();
-      } else {
-        console.error(`Erro ao acessar ML: ${res.status || fallbackRes.status}`);
-        return null;
-      }
-    }
-
-    // 1. Tenta extrair dados estruturados JSON-LD (Schema.org) se disponível
-    const jsonLdMatch = html.match(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/);
-    if (jsonLdMatch) {
-      try {
-        const parsed = JSON.parse(jsonLdMatch[1]);
-        if (parsed?.offers?.price) {
-          const precoNumerico = Number(parsed.offers.price);
-          return {
-            preco: precoNumerico,
-            preco_formatado: precoNumerico.toLocaleString("pt-BR", {
-              style: "currency",
-              currency: "BRL",
-            }),
-            titulo: parsed.name || termoBusca,
-            link: parsed.url || url,
-            tem_full:
-              html.includes("full-badge") ||
-              html.includes("Envio Full") ||
-              html.includes("svg-icon-full") ||
-              html.includes("poly-component__fulfillment"),
-            thumbnail: parsed.image || null,
-          };
-        }
-      } catch (e) {
-        console.warn("Erro ao fazer parse de JSON-LD:", e);
-      }
-    }
-
-    // 2. Extração via Regex no HTML dos cards de produto da nova busca do ML
-    // Busca o padrão de fração de preço: class="andes-money-amount__fraction">XXX</span>
-    const matchPreco =
-      html.match(/class="andes-money-amount__fraction"[^>]*>([\d\.]+)<\/span>/) ||
-      html.match(/class="[^"]*andes-money-amount__fraction[^"]*"[^>]*>([\d\.]+)/);
-    const matchCentavos = html.match(/class="[^"]*andes-money-amount__cents[^"]*"[^>]*>([\d]+)/);
-
-    const matchLink =
-      html.match(/href="(https:\/\/[^"]*mercadolivre\.com\.br\/[a-zA-Z0-9-]+\/up\/MLBU?[0-9]+[^"]*)"/) ||
-      html.match(/href="(https:\/\/produto\.mercadolivre\.com\.br\/MLB-[0-9]+[^"]*)"/) ||
-      html.match(/href="(https:\/\/[^"]*mercadolivre\.com\.br\/p\/MLB[0-9]+[^"]*)"/) ||
-      html.match(/href="(https:\/\/[^"]*mercadolivre\.com\.br\/MLB-[^"]*)"/);
-
-    const matchTitulo =
-      html.match(/class="[^"]*(?:poly-component__title|ui-search-item__title)[^"]*"[^>]*><a[^>]*>([^<]+)<\/a>/) ||
-      html.match(/class="[^"]*(?:poly-component__title|ui-search-item__title)[^"]*"[^>]*>([^<]+)</) ||
-      html.match(/<h2[^>]*>([^<]+)<\/h2>/);
-
-    const matchThumb = html.match(/(?:src|data-src)="(https:\/\/[^"]*(?:http2\.mlstatic\.com\/D_[^"]*))"/);
-
-    if (matchPreco) {
-      const valorFormatado = matchPreco[1].replace(/\./g, "");
-      const centavos = matchCentavos ? matchCentavos[1] : "00";
-      const precoNumerico = parseFloat(valorFormatado) + parseFloat(centavos) / 100;
-
-      const rawLink = matchLink
-        ? matchLink[1].replace(/&amp;/g, "&")
-        : `https://lista.mercadolivre.com.br/${encodeURIComponent(termoBusca)}`;
-      const cleanLink = rawLink.split("#")[0].split("?")[0];
-
-      return {
-        preco: precoNumerico,
-        preco_formatado: precoNumerico.toLocaleString("pt-BR", {
-          style: "currency",
-          currency: "BRL",
-        }),
-        titulo: matchTitulo ? matchTitulo[1].trim() : termoBusca,
-        link: cleanLink,
-        tem_full:
-          html.includes("full-badge") ||
-          html.includes("svg-icon-full") ||
-          html.includes("poly-component__fulfillment") ||
-          html.includes("Envio Full"),
-        thumbnail: matchThumb ? matchThumb[1] : null,
-      };
-    }
-
-    return null;
-  } catch (error) {
-    console.error("Erro no scraping do ML:", error);
-    return null;
-  }
-}
+export type { OfertaRealML };
 
 /**
  * Atualiza os itens com os preços reais do Mercado Livre e formata os dados para o frontend
@@ -262,6 +135,7 @@ async function sincronizarPrecosReais(orcamento: OrcamentoResposta): Promise<Orc
       const oferta = await buscarPrecoMercadoLivre(termoBusca);
 
       if (oferta) {
+        item.preco = oferta.preco;
         item.preco_real_ml = oferta.preco;
         item.preco_formatado = oferta.preco_formatado;
         item.preco_medio = oferta.preco_formatado;
@@ -271,6 +145,7 @@ async function sincronizarPrecosReais(orcamento: OrcamentoResposta): Promise<Orc
         item.link_direto_anuncio = oferta.link;
         item.tem_full = oferta.tem_full;
         item.thumbnail = oferta.thumbnail;
+        item.preco_original = oferta.original_price;
         item.preco_real = true;
       }
     })
@@ -285,13 +160,16 @@ async function sincronizarPrecosReais(orcamento: OrcamentoResposta): Promise<Orc
 
   // Recalcula o total_estimado somando estritamente os PREÇOS REAIS encontrados
   let totalNum = 0;
+  let pecasComPreco = 0;
   for (const it of orcamento.itens) {
-    if (it.preco_real_ml && it.preco_real_ml > 0) {
-      totalNum += it.preco_real_ml * (it.quantidade || 1);
+    const p = it.preco ?? it.preco_real_ml;
+    if (typeof p === "number" && p > 0) {
+      totalNum += p * (it.quantidade || 1);
+      pecasComPreco++;
     }
   }
 
-  if (totalNum > 0) {
+  if (pecasComPreco > 0 && totalNum > 0) {
     orcamento.total_estimado = totalNum.toLocaleString("pt-BR", {
       style: "currency",
       currency: "BRL",
@@ -317,7 +195,37 @@ function extrairFallbackInteligente(texto: string): OrcamentoResposta {
   const anoMatch = t.match(/\b(19\d{2}|20\d{2})\b/);
   const ano = anoMatch ? anoMatch[0] : null;
 
-  if (t.includes("onix")) {
+  if (t.includes("kwid")) {
+    marca = "Renault";
+    modelo = "Kwid";
+    motorizacao = "1.0";
+    termoCarro = `kwid 1.0 ${ano || ""}`.trim();
+  } else if (t.includes("sandero")) {
+    marca = "Renault";
+    modelo = "Sandero";
+    motorizacao = "1.0 / 1.6";
+    termoCarro = `sandero ${ano || ""}`.trim();
+  } else if (t.includes("duster")) {
+    marca = "Renault";
+    modelo = "Duster";
+    motorizacao = "1.6 / 2.0";
+    termoCarro = `duster ${ano || ""}`.trim();
+  } else if (t.includes("clio")) {
+    marca = "Renault";
+    modelo = "Clio";
+    motorizacao = "1.0 / 1.6";
+    termoCarro = `clio ${ano || ""}`.trim();
+  } else if (t.includes("mobi")) {
+    marca = "Fiat";
+    modelo = "Mobi";
+    motorizacao = "1.0 Fire";
+    termoCarro = `mobi ${ano || ""}`.trim();
+  } else if (t.includes("argo")) {
+    marca = "Fiat";
+    modelo = "Argo";
+    motorizacao = "1.0 / 1.3";
+    termoCarro = `argo ${ano || ""}`.trim();
+  } else if (t.includes("onix")) {
     marca = "Chevrolet";
     modelo = "Onix";
     motorizacao = "1.0 / 1.4";
@@ -561,13 +469,16 @@ export async function POST(request: NextRequest) {
       },
     };
 
-    // Modelos suportados na API v1beta (gemini-3.5-flash e variantes ativas)
+    // Modelos suportados na API v1beta (gemini-flash-latest e variantes ativas)
     const modelsToTry = [
       process.env.GEMINI_MODEL,
+      "gemini-flash-latest",
+      "gemini-2.5-flash",
+      "gemini-2.0-flash",
+      "gemini-1.5-flash",
       "gemini-3.5-flash",
       "gemini-3.5-flash-lite",
       "gemini-3.1-flash-lite",
-      "gemini-flash-latest",
       "gemini-3.8-flash",
     ].filter(Boolean) as string[];
 

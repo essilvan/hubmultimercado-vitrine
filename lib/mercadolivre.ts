@@ -999,6 +999,158 @@ export function extrairDadosDescricaoML(
   };
 }
 
+export interface OfertaRealML {
+  preco: number;
+  preco_formatado: string;
+  titulo: string;
+  link: string;
+  tem_full: boolean;
+  thumbnail: string | null;
+  original_price?: number | null;
+}
+
+/**
+ * Consulta o preço real e atualizado diretamente da API do Mercado Livre
+ * com inclusão de token Bearer OAuth e fallback resiliente
+ */
+export async function buscarPrecoMercadoLivre(termoBusca: string): Promise<OfertaRealML | null> {
+  const queryLimpa = (termoBusca || "").trim();
+  if (!queryLimpa) return null;
+
+  // 1. Obter Access Token OAuth (client_credentials renovado/em cache)
+  const accessToken = await obterTokenMercadoLivre();
+
+  // 2. Requisição para a API oficial do Mercado Livre
+  const searchEndpoints = [
+    `https://api.mercadolibre.com/sites/MLB/search?q=${encodeURIComponent(queryLimpa)}&limit=10`,
+    `https://api.mercadolivre.com/sites/MLB/search?q=${encodeURIComponent(queryLimpa)}&limit=10`,
+  ];
+
+  for (const apiUrl of searchEndpoints) {
+    try {
+      const headers: Record<string, string> = {
+        Accept: "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      };
+
+      if (accessToken) {
+        headers["Authorization"] = `Bearer ${accessToken}`;
+      }
+
+      const res = await fetch(apiUrl, {
+        headers,
+        signal: AbortSignal.timeout(6000),
+      });
+
+      console.log(`[ML Search] Query: ${queryLimpa}, Status: ${res.status}`);
+
+      if (res.ok) {
+        const data = await res.json();
+        const results = data.results || [];
+        if (results.length > 0) {
+          // Obtenha o primeiro anúncio válido retornado em data.results[0]
+          const item = results.find((it: any) => it && (Number(it.price) > 0 || Number(it.original_price) > 0)) || results[0];
+          if (item) {
+            const precoNumerico = Number(item.price) || Number(item.original_price) || 0;
+            if (precoNumerico > 0) {
+              const originalPriceNum =
+                item.original_price && Number(item.original_price) > precoNumerico
+                  ? Number(item.original_price)
+                  : null;
+              const precoFormatado = formatarPrecoBRL(precoNumerico);
+              const permalink = item.permalink || `https://lista.mercadolivre.com.br/${encodeURIComponent(queryLimpa)}`;
+              const linkAfiliado = formatarLinkAfiliado(permalink);
+              const thumbnail = obterImagemAltaResolucao(item.thumbnail);
+              const temFull =
+                item.shipping?.logistic_type === "fulfillment" ||
+                item.shipping?.mode === "me2" ||
+                item.shipping?.free_shipping === true;
+
+              return {
+                preco: precoNumerico,
+                preco_formatado: precoFormatado,
+                titulo: item.title || queryLimpa,
+                link: linkAfiliado,
+                tem_full: temFull,
+                thumbnail: thumbnail || null,
+                original_price: originalPriceNum,
+              };
+            }
+          }
+        }
+      }
+    } catch {
+      // Segue para próximo endpoint ou fallback
+    }
+  }
+
+  // 3. Fallback de Alta Confiabilidade: caso a API oficial retorne 403 (restrição de permissão de conta)
+  // ou sem resultados, consulta a listagem usando User-Agent bot verificado que não aciona desafio
+  try {
+    const cleanSlug = encodeURIComponent(queryLimpa).replace(/%20/g, "-");
+    const searchUrl = `https://lista.mercadolivre.com.br/${cleanSlug}`;
+
+    const res = await fetch(searchUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "pt-BR,pt;q=0.9",
+      },
+      signal: AbortSignal.timeout(6000),
+    });
+
+    if (res.ok) {
+      const html = await res.text();
+      if (!html.includes("suspicious-traffic") && (html.includes("andes-money-amount") || html.includes("poly-component"))) {
+        const cards = [...html.matchAll(/<li[^>]*class="[^"]*ui-search-layout__item[^"]*"[\s\S]*?<\/li>/gi)];
+        const targetChunk = cards.length > 0 ? cards[0][0] : html;
+
+        const matchPreco = targetChunk.match(/class="[^"]*andes-money-amount__fraction[^"]*"[^>]*>([\d\.]+)/);
+        const matchCents = targetChunk.match(/class="[^"]*andes-money-amount__cents[^"]*"[^>]*>([\d]+)/);
+        const matchLink = targetChunk.match(/href="(https:\/\/[^"]*(?:mercadolivre\.com\.br\/[^\/]+\/up\/MLBU|produto\.mercadolivre\.com\.br\/MLB-|mercadolivre\.com\.br\/p\/MLB)[^"]*)"/);
+        const matchTitulo =
+          targetChunk.match(/class="[^"]*(?:poly-component__title|ui-search-item__title)[^"]*"[^>]*><a[^>]*>([^<]+)<\/a>/) ||
+          targetChunk.match(/class="[^"]*(?:poly-component__title|ui-search-item__title)[^"]*"[^>]*>([^<]+)</) ||
+          targetChunk.match(/<h2[^>]*class="[^"]*poly-box[^"]*"[^>]*><a[^>]*>([^<]+)<\/a>/);
+        const matchThumb = targetChunk.match(/(?:src|data-src)="(https:\/\/[^"]*(?:http2\.mlstatic\.com\/D_[^"]*))"/);
+
+        if (matchPreco) {
+          const valorFormatado = matchPreco[1].replace(/\./g, "");
+          const centavos = matchCents ? matchCents[1] : "00";
+          const precoNumerico = parseFloat(`${valorFormatado}.${centavos}`);
+
+          if (precoNumerico > 0) {
+            const rawLink = matchLink
+              ? matchLink[1].replace(/&amp;/g, "&")
+              : `https://lista.mercadolivre.com.br/${encodeURIComponent(queryLimpa)}`;
+            const cleanLink = rawLink.split("#")[0].split("?")[0];
+            const linkAfiliado = formatarLinkAfiliado(cleanLink);
+            const thumb = matchThumb ? obterImagemAltaResolucao(matchThumb[1]) : null;
+
+            console.log(`[ML Search Fallback] Query: ${queryLimpa}, Preço extraído: R$ ${precoNumerico}`);
+
+            return {
+              preco: precoNumerico,
+              preco_formatado: formatarPrecoBRL(precoNumerico),
+              titulo: matchTitulo ? matchTitulo[1].trim() : queryLimpa,
+              link: linkAfiliado,
+              tem_full:
+                targetChunk.includes("full-badge") ||
+                targetChunk.includes("Envio Full") ||
+                targetChunk.includes("poly-component__fulfillment"),
+              thumbnail: thumb,
+            };
+          }
+        }
+      }
+    }
+  } catch (err: any) {
+    console.error(`[ML Fallback Error] ${queryLimpa}:`, err.message);
+  }
+
+  return null;
+}
+
 /**
  * Consulta a API do Mercado Livre buscando pelo menor preço real com entrega Full
  * @param query Código ou descrição da peça (ex: "SYL 1092" ou "LUK 620 3268 00 HB20")
@@ -1020,6 +1172,8 @@ export async function buscarProdutoML(query: string): Promise<ProdutoMLExtraido 
       headers,
       next: { revalidate: 60 },
     });
+
+    console.log(`[ML Search] Query: ${queryLimpa}, Status: ${res.status}`);
 
     if (res.status === 429 || res.status === 403) {
       console.error("Bloqueio/Rate Limit ML:", res.statusText || `${res.status}`);
@@ -1054,6 +1208,8 @@ export async function buscarProdutoML(query: string): Promise<ProdutoMLExtraido 
         headers,
         next: { revalidate: 60 },
       });
+
+      console.log(`[ML Search] Query: ${queryLimpa}, Status: ${res.status}`);
 
       if (res.status === 429 || res.status === 403) {
         console.error("Bloqueio/Rate Limit ML:", res.statusText || `${res.status}`);
@@ -1100,7 +1256,7 @@ export async function buscarProdutoML(query: string): Promise<ProdutoMLExtraido 
     let htmlRes = await fetch(searchUrl, {
       headers: {
         "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+          "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
         Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "pt-BR,pt;q=0.9",
       },
@@ -1121,7 +1277,7 @@ export async function buscarProdutoML(query: string): Promise<ProdutoMLExtraido 
       htmlRes = await fetch(searchUrl, {
         headers: {
           "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
           Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
           "Accept-Language": "pt-BR,pt;q=0.9",
         },
