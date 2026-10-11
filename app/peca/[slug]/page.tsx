@@ -23,7 +23,7 @@ import {
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { formatarLinkAfiliado, MODELOS_CONHECIDOS } from "@/lib/mercadolivre";
-import { limparSlug } from "@/lib/slug";
+import { limparSlug, extrairCodigoFabricanteLimpo } from "@/lib/slug";
 
 export const revalidate = 3600; // Revalidação a cada 1 hora para SEO dinâmico
 
@@ -148,7 +148,19 @@ async function getProduto(slug: string): Promise<ProdutoDb | null> {
       }
     }
 
-    // 3. Fallback: busca pelo sufixo de hash final (ex: "-1321")
+    // 3. Fallback: busca por slugs legados gravados em especificacoes.slugs_antigos
+    const { data: dataAntigo } = await supabase
+      .from("produtos_afiliados")
+      .select("*")
+      .contains("especificacoes", { slugs_antigos: [slug] })
+      .limit(1)
+      .maybeSingle();
+
+    if (dataAntigo) {
+      return dataAntigo as ProdutoDb;
+    }
+
+    // 4. Fallback: busca pelo sufixo de hash final (ex: "-1321")
     const hashMatch = slug.match(/-([a-z0-9]{4})$/i);
     if (hashMatch) {
       const hash = hashMatch[1];
@@ -335,12 +347,14 @@ export async function generateMetadata({ params }: PageProps): Promise<Metadata>
     };
   }
 
-  const dadosTecnicos = produto.especificacoes?.dados_tecnicos || {};
-  const codigoDestaque =
+  const dadosTecnicos = (produto.especificacoes?.dados_tecnicos || {}) as DadosTecnicosDb;
+  const rawCodigo =
     dadosTecnicos.mpn ||
     dadosTecnicos.codigo_fabricante ||
     produto.codigo_fabricante ||
     "COD-ML";
+  const codigoDestaque =
+    rawCodigo.length > 25 ? extrairCodigoFabricanteLimpo(rawCodigo) || rawCodigo : rawCodigo;
   const marcaDestaque = dadosTecnicos.marca || produto.marca || "Auto Peças";
 
   // Modelos principais
@@ -440,12 +454,14 @@ export default async function PecaSlugPage({ params }: PageProps) {
 
   // Dados técnicos estruturados
   const dadosTecnicos = (produto.especificacoes?.dados_tecnicos || {}) as DadosTecnicosDb;
-  const codigoFabricanteDestaque =
+  const rawCodigo =
     dadosTecnicos.mpn ||
     dadosTecnicos.codigo_fabricante ||
     dadosTecnicos.numero_peca ||
     produto.codigo_fabricante ||
     "COD-ML";
+  const codigoFabricanteDestaque =
+    rawCodigo.length > 25 ? extrairCodigoFabricanteLimpo(rawCodigo) || rawCodigo : rawCodigo;
   const marcaDestaque = dadosTecnicos.marca || produto.marca || "Auto Peças";
   const modeloDestaque = dadosTecnicos.modelo || (produto.especificacoes?.modelo as string) || undefined;
   const oemDestaque = dadosTecnicos.codigo_oem || produto.codigo_oem || undefined;
@@ -703,6 +719,26 @@ export default async function PecaSlugPage({ params }: PageProps) {
             <h1 className="text-2xl sm:text-3xl font-extrabold text-zinc-900 dark:text-white leading-tight tracking-tight">
               {produto.titulo}
             </h1>
+
+            {/* Destaque do Código do Fabricante (OEM / MPN) em Badge logo abaixo do título principal */}
+            <div className="flex flex-wrap items-center gap-2 pt-1 pb-1">
+              <span className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-xl text-xs sm:text-sm font-black bg-gradient-to-r from-amber-500/15 to-amber-500/5 text-amber-950 dark:text-amber-300 border border-amber-300 dark:border-amber-700/60 shadow-xs">
+                <Tag className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
+                <span className="text-[11px] uppercase font-bold text-zinc-500 dark:text-zinc-400">
+                  Código do Fabricante (MPN):
+                </span>
+                <span className="font-mono font-black text-zinc-950 dark:text-amber-200 select-all">
+                  {codigoFabricanteDestaque}
+                </span>
+              </span>
+
+              {oemDestaque && oemDestaque !== codigoFabricanteDestaque && (
+                <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-zinc-100 dark:bg-zinc-800 text-zinc-800 dark:text-zinc-200 border border-zinc-200 dark:border-zinc-700">
+                  <span className="text-[10px] uppercase font-bold text-zinc-400">OEM:</span>
+                  <span className="font-mono font-black select-all">{oemDestaque}</span>
+                </span>
+              )}
+            </div>
 
             {/* Selo de Frete Full em Destaque */}
             <div className="flex items-center gap-3 p-3.5 rounded-xl bg-gradient-to-r from-emerald-500/10 via-teal-500/10 to-transparent border border-emerald-500/20">
@@ -1143,42 +1179,54 @@ export default async function PecaSlugPage({ params }: PageProps) {
       {/* =========================================================================
           BARRA FIXA DE CONVERSÃO NO RODAPÉ EM TELAS MOBILE (STICKY BOTTOM CTA)
       ========================================================================== */}
-      <div className="lg:hidden fixed bottom-0 left-0 right-0 z-50 bg-white/95 dark:bg-zinc-900/95 backdrop-blur-md border-t border-zinc-200 dark:border-zinc-800 p-3 shadow-2xl flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2.5 min-w-0">
-          {produto.imagem_url ? (
-            <div className="relative w-11 h-11 rounded-lg bg-zinc-100 dark:bg-zinc-800 shrink-0 overflow-hidden border border-zinc-200 dark:border-zinc-700">
-              <Image
-                src={produto.imagem_url}
-                alt={produto.titulo}
-                fill
-                sizes="44px"
-                className="object-contain p-1"
-              />
-            </div>
-          ) : (
-            <div className="w-11 h-11 rounded-lg bg-zinc-100 dark:bg-zinc-800 flex items-center justify-center shrink-0 text-zinc-400">
-              <Package className="w-5 h-5" />
-            </div>
-          )}
-          <div className="min-w-0">
-            {precoExibicao ? (
-              <div className="flex items-baseline gap-1.5">
-                <span className="text-base font-black text-emerald-600 dark:text-emerald-400 leading-tight">
-                  {precoExibicao}
-                </span>
-                <span className="inline-flex items-center gap-0.5 px-1 py-0.5 rounded text-[9px] font-black bg-yellow-400 text-zinc-950">
-                  <Zap className="w-2.5 h-2.5 fill-zinc-950" />
-                  FULL
-                </span>
+      <aside
+        aria-label="Ação rápida de compra mobile"
+        className="lg:hidden fixed bottom-0 left-0 right-0 z-50 bg-white/95 dark:bg-zinc-900/95 backdrop-blur-md border-t border-zinc-200 dark:border-zinc-800 p-3 shadow-[0_-8px_30px_rgba(0,0,0,0.12)] space-y-2.5"
+      >
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5 min-w-0">
+            {produto.imagem_url ? (
+              <div className="relative w-9 h-9 rounded-lg bg-zinc-100 dark:bg-zinc-800 shrink-0 overflow-hidden border border-zinc-200 dark:border-zinc-700">
+                <Image
+                  src={produto.imagem_url}
+                  alt={produto.titulo}
+                  fill
+                  sizes="36px"
+                  className="object-contain p-0.5"
+                />
               </div>
             ) : (
-              <span className="text-xs font-bold text-zinc-800 dark:text-zinc-200">
-                Pronta Entrega
-              </span>
+              <div className="w-9 h-9 rounded-lg bg-zinc-100 dark:bg-zinc-800 flex items-center justify-center shrink-0 text-zinc-400">
+                <Package className="w-4 h-4" />
+              </div>
             )}
-            <p className="text-[11px] text-zinc-500 dark:text-zinc-400 truncate max-w-[130px] sm:max-w-[180px]">
-              {codigoFabricanteDestaque} • {marcaDestaque}
-            </p>
+            <div className="min-w-0">
+              {precoExibicao ? (
+                <div className="flex items-baseline gap-1.5">
+                  <span className="text-sm font-black text-emerald-600 dark:text-emerald-400 leading-tight">
+                    {precoExibicao}
+                  </span>
+                  <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[9px] font-black bg-yellow-400 text-zinc-950">
+                    <Zap className="w-2.5 h-2.5 fill-zinc-950" />
+                    FULL
+                  </span>
+                </div>
+              ) : (
+                <span className="text-xs font-bold text-zinc-800 dark:text-zinc-200">
+                  Pronta Entrega
+                </span>
+              )}
+              <p className="text-[10px] text-zinc-500 dark:text-zinc-400 truncate max-w-[200px]">
+                {codigoFabricanteDestaque} • {marcaDestaque}
+              </p>
+            </div>
+          </div>
+
+          <div className="text-right shrink-0">
+            <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-bold block">
+              Envio Imediato
+            </span>
+            <span className="text-[9px] text-zinc-400 block">Compra Garantida</span>
           </div>
         </div>
 
@@ -1186,14 +1234,14 @@ export default async function PecaSlugPage({ params }: PageProps) {
           href={urlAfiliadoComMattTool}
           target="_blank"
           rel="nofollow sponsored"
-          className="shrink-0 flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-yellow-400 hover:bg-yellow-500 active:bg-yellow-600 text-zinc-950 font-black text-xs shadow-md transition-transform active:scale-95"
-          title={`Comprar ${produto.titulo} no Mercado Livre`}
+          className="w-full flex items-center justify-center gap-2 py-3 px-4 rounded-xl bg-yellow-400 hover:bg-yellow-500 active:bg-yellow-600 text-zinc-950 font-black text-xs sm:text-sm shadow-md transition-all active:scale-[0.98] text-center"
+          title={`Ver no Mercado Livre com Frete Full - ${produto.titulo}`}
         >
-          <Zap className="w-3.5 h-3.5 fill-zinc-950 text-zinc-950" />
-          <span>Ver Oferta</span>
-          <ExternalLink className="w-3 h-3 opacity-80" />
+          <Zap className="w-4 h-4 fill-zinc-950 text-zinc-950 shrink-0" />
+          <span>Ver no Mercado Livre com Frete Full</span>
+          <ExternalLink className="w-3.5 h-3.5 opacity-80 shrink-0" />
         </a>
-      </div>
+      </aside>
     </div>
   );
 }

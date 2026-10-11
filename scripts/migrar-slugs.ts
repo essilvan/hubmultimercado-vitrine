@@ -46,7 +46,7 @@ async function migrarSlugs() {
 
   const { data: produtos, error } = await supabase
     .from("produtos_afiliados")
-    .select("id, titulo, slug, marca, codigo_fabricante, veiculos_compativeis")
+    .select("id, titulo, slug, marca, codigo_fabricante, veiculos_compativeis, especificacoes, ml_id")
     .order("created_at", { ascending: false });
 
   if (error || !produtos) {
@@ -58,45 +58,86 @@ async function migrarSlugs() {
 
   let atualizados = 0;
   let jaLimpos = 0;
+  const slugsOcupados = new Set<string>();
+
+  // Primeiro indexa slugs de produtos que já são válidos (<=80 chars, sem x27, etc)
+  for (const prod of produtos) {
+    if (
+      prod.slug &&
+      prod.slug.length <= 80 &&
+      !prod.slug.includes("x27") &&
+      !/(?:19|20)?\d{2}-(?:19|20)?\d{2}-(?:19|20)?\d{2}/.test(prod.slug)
+    ) {
+      slugsOcupados.add(prod.slug);
+    }
+  }
 
   for (const prod of produtos) {
     const slugAtual = prod.slug || "";
-    // Tenta primeiro limpar o slug existente preservando o hash
-    let slugNovo = limparSlug(slugAtual);
+    let slugNovo = "";
 
-    // Se ainda contiver termos indesejados ou se puder ser reconstruído mais semanticamente:
-    if (
+    const precisaHigienizacao =
+      !slugAtual ||
+      slugAtual.length > 80 ||
+      slugAtual.length > 100 ||
+      slugAtual.includes("x27") ||
       slugAtual.startsWith("auto-pecas") ||
       slugAtual.includes("cod-ml") ||
-      /^[a-z0-9]+-[a-z0-9]+-(?:cod|pec)-/i.test(slugAtual) ||
-      !slugNovo
-    ) {
+      /(?:19|20)?\d{2}-(?:19|20)?\d{2}-(?:19|20)?\d{2}/.test(slugAtual);
+
+    if (precisaHigienizacao) {
+      // Reconstrói um slug limpo e semântico
       slugNovo = gerarSlugProduto({
         titulo: prod.titulo,
         marca: prod.marca,
         veiculo: prod.veiculos_compativeis,
         codigo: prod.codigo_fabricante,
-        hash: slugAtual.slice(-4),
       });
+
+      // Se colidir com outro produto, acrescenta sufixo identificador único
+      if (slugsOcupados.has(slugNovo)) {
+        const hash = (prod.ml_id ? prod.ml_id.replace(/\D/g, "").slice(-4) : null) || prod.id.replace(/\D/g, "").slice(-4) || "01";
+        slugNovo = `${slugNovo.slice(0, 75)}-${hash}`;
+      }
+    } else {
+      slugNovo = limparSlug(slugAtual);
     }
 
-    if (slugNovo !== slugAtual) {
+    if (slugNovo !== slugAtual || !slugAtual) {
       console.log(`[ATUALIZANDO] ID: ${prod.id}`);
-      console.log(`   DE:   "${slugAtual}"`);
-      console.log(`   PARA: "${slugNovo}"\n`);
+      console.log(`   DE (${slugAtual.length}):   "${slugAtual}"`);
+      console.log(`   PARA (${slugNovo.length}): "${slugNovo}"\n`);
+
+      // Atualiza especificações com lista de slugs antigos para redirect
+      const especificacoesAtuais = prod.especificacoes || {};
+      const slugsAntigos = Array.isArray(especificacoesAtuais.slugs_antigos)
+        ? [...especificacoesAtuais.slugs_antigos]
+        : [];
+
+      if (slugAtual && !slugsAntigos.includes(slugAtual)) {
+        slugsAntigos.push(slugAtual);
+      }
 
       const { error: updateError } = await supabase
         .from("produtos_afiliados")
-        .update({ slug: slugNovo })
+        .update({
+          slug: slugNovo,
+          especificacoes: {
+            ...especificacoesAtuais,
+            slugs_antigos: slugsAntigos,
+          },
+        })
         .eq("id", prod.id);
 
       if (updateError) {
         console.error(`   ERRO ao atualizar ${prod.id}:`, updateError.message);
       } else {
         atualizados++;
+        slugsOcupados.add(slugNovo);
       }
     } else {
       jaLimpos++;
+      slugsOcupados.add(slugNovo);
     }
   }
 

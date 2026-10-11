@@ -52,6 +52,8 @@ export const MARCAS_AUTOMOTIVAS = [
   "skf",
   "ina",
   "fag",
+  "yiming parts",
+  "yiming",
 ];
 
 // Marcas genéricas ou termos que NUNCA devem compor o slug como marca oficial
@@ -255,6 +257,9 @@ export const NOMES_PECAS = [
   "bomba dagua",
   "bomba d agua",
   "bomba agua",
+  "carcaca valvula termostatica",
+  "carcaca e valvula termostatica",
+  "carcaca de valvula termostatica",
   "cavalete valvula termostatica",
   "valvula termostatica",
   "radiador agua",
@@ -302,6 +307,133 @@ export const NOMES_PECAS = [
 ];
 
 /**
+ * Remove entidades HTML e códigos de escape como &#x27;, &quot;, &amp;, etc.
+ * Converte contrações comuns do português (ex: d'água -> dagua).
+ */
+export function decodificarEntidadesHtml(text: string): string {
+  if (!text || typeof text !== "string") return "";
+  let t = text;
+
+  // 1. Trata contrações em português com apóstrofo: d'água, d'agua, d&#x27;agua, d\x27agua -> dagua
+  t = t.replace(/\b([dc])(?:&#x27;|&#39;|&apos;|\\x27|['’])([a-zà-ú]+)\b/gi, "$1$2");
+
+  // 2. Decodifica ou substitui entidades HTML
+  t = t
+    .replace(/&(?:amp|#38);/gi, " e ")
+    .replace(/&(?:quot|#34);/gi, " ")
+    .replace(/&(?:apos|#39;|#x27;|x27);/gi, "")
+    .replace(/&(?:nbsp|#160);/gi, " ")
+    .replace(/&(?:lt|#60);/gi, " ")
+    .replace(/&(?:gt|#62);/gi, " ")
+    .replace(/&#[0-9]+;/g, " ")
+    .replace(/&#x[0-9a-f]+;/gi, " ")
+    .replace(/&[a-z]+;/gi, " ");
+
+  // 3. Remove escapes literais residuais (sem afetar dimensões como 22x27 dentes)
+  t = t.replace(/\\x27/g, "");
+  t = t.replace(/\b([dc])[-_]?x27[-_]?([a-zà-ú]+)\b/gi, "$1$2");
+
+  return t;
+}
+
+/**
+ * Detecta e compacta sequências de anos em slugs (ex: 87-88-89-90-91... -> 1987-a-2009).
+ * Reconhece anos de 2 e 4 dígitos consecutivos em ordem crescente.
+ */
+export function compactarAnosSequenciais(slug: string): string {
+  if (!slug || typeof slug !== "string") return "";
+  const tokens = slug.split("-");
+  const result: string[] = [];
+  let i = 0;
+
+  function parseAno(tok: string): number | null {
+    if (!/^\d{2}$|^\d{4}$/.test(tok)) return null;
+    const n = parseInt(tok, 10);
+    if (tok.length === 4) {
+      if (n >= 1950 && n <= 2050) return n;
+      return null;
+    }
+    // 2 dígitos
+    if (n >= 50 && n <= 99) return 1900 + n;
+    if (n >= 0 && n <= 49) return 2000 + n;
+    return null;
+  }
+
+  while (i < tokens.length) {
+    const anoAtual = parseAno(tokens[i]);
+    if (anoAtual !== null) {
+      let j = i + 1;
+      let ultimoAno = anoAtual;
+
+      while (j < tokens.length) {
+        const proxAno = parseAno(tokens[j]);
+        if (proxAno !== null && proxAno === ultimoAno + 1) {
+          ultimoAno = proxAno;
+          j++;
+        } else {
+          break;
+        }
+      }
+
+      const seqLength = j - i;
+      if (seqLength >= 3) {
+        result.push(String(anoAtual), "a", String(ultimoAno));
+        i = j;
+        continue;
+      }
+    }
+
+    result.push(tokens[i]);
+    i++;
+  }
+
+  return result.join("-").replace(/-+/g, "-");
+}
+
+/**
+ * Impede a repetição de palavras no slug:
+ * - Nenhuma palavra pode aparecer mais de 2 vezes no slug total.
+ * - Remove duplicidades consecutivas imediatas (ex: nakata-nakata -> nakata, valvula-termostatica-valvula-termostatica -> valvula-termostatica).
+ */
+export function limitarRepeticaoPalavras(slug: string, maxOcorrencias = 2): string {
+  if (!slug || typeof slug !== "string") return "";
+  let s = slug;
+
+  // Frases repetidas consecutivas (bigramas)
+  s = s.replace(/\b([a-z0-9]+-[a-z0-9]+)-\1\b/g, "$1");
+  // Palavras repetidas consecutivas imediatas
+  s = s.replace(/\b([a-z0-9]+)-\1\b/g, "$1");
+
+  const tokens = s.split("-").filter(Boolean);
+  const wordCounts: Record<string, number> = {};
+  const filtered: string[] = [];
+
+  for (const tok of tokens) {
+    const count = wordCounts[tok] || 0;
+    if (count < maxOcorrencias) {
+      wordCounts[tok] = count + 1;
+      filtered.push(tok);
+    }
+  }
+
+  return filtered.join("-");
+}
+
+/**
+ * Limita o tamanho máximo do slug para até maxLen caracteres (padrão 80),
+ * cortando sempre na última palavra inteira (fronteira de hífen).
+ */
+export function truncarSlug(slug: string, maxLen = 80): string {
+  if (!slug || slug.length <= maxLen) return slug;
+  const sub = slug.slice(0, maxLen);
+  const lastHyphen = sub.lastIndexOf("-");
+  if (lastHyphen > 15) {
+    return sub.slice(0, lastHyphen).replace(/-+$/, "");
+  }
+  return sub.replace(/-+$/, "");
+}
+
+/**
  * Verifica se uma marca informada é válida ou se é um termo genérico
  */
 export function isMarcaValida(marca?: string | null): boolean {
@@ -311,10 +443,31 @@ export function isMarcaValida(marca?: string | null): boolean {
     .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase()
     .trim();
-  if (clean.length < 2) return false;
+  if (clean.length < 2 || clean.length > 25) return false;
   if (MARCAS_GENERICAS.has(clean)) return false;
   if (clean.startsWith("auto-pecas") || clean.startsWith("auto pecas")) return false;
+  if (/[\+\/]/.test(clean)) return false;
+  if (/\b(valvula|termostatica|carcaca|sensor|disco|amortecedor|pastilha|kit|bomba)\b/.test(clean)) return false;
   return true;
+}
+
+/**
+ * Extrai o código primário de peça caso o campo venha com frases ou múltiplos códigos.
+ */
+export function extrairCodigoFabricanteLimpo(codigo?: string | null): string {
+  if (!codigo || typeof codigo !== "string") return "";
+  let clean = codigo.trim();
+  // Remove prefixos como "SCHADEK: 20256 | 90000856" ou "HF38 - Similares: BD0178"
+  clean = clean.replace(/^(?:oem|mpn|cod|ref|schadek|fabricante|similares|ref\.)[:\s-]+/i, "");
+  // Se contiver múltiplos códigos separados por barra, pipe, ponto e vírgula ou traço com espaço
+  const parts = clean.split(/\s*[\/|;]\s*|\s+-\s+/);
+  for (const p of parts) {
+    const match = p.trim().match(/\b([A-Z0-9]{3,20})\b/i);
+    if (match && !/^(sem|nao|null|cod|pec|mlb)$/i.test(match[1])) {
+      return match[1];
+    }
+  }
+  return clean.slice(0, 20);
 }
 
 /**
@@ -328,12 +481,13 @@ export function isCodigoValido(codigo?: string | null): boolean {
     .toLowerCase()
     .trim();
 
-  if (clean.length < 2) return false;
+  if (clean.length < 2 || clean.length > 30) return false;
   if (clean === "cod-ml" || clean === "cod_ml" || clean === "codml" || clean === "cod") return false;
   if (clean.endsWith("-pec") || clean.endsWith("-cod")) return false;
   if (clean.startsWith("auto-pecas") || clean.startsWith("autopecas")) return false;
   if (/^mlb-?\d+/i.test(clean)) return false;
   if (/^(sem|nao|null|undefined|none)$/i.test(clean)) return false;
+  if (/\b(valvula|termostatica|carcaca|amortecedor|pastilha|disco|bomba|correia)\b/i.test(clean)) return false;
 
   return true;
 }
@@ -341,12 +495,15 @@ export function isCodigoValido(codigo?: string | null): boolean {
 /**
  * Função básica para transformar qualquer texto em formato kebab-case limpo.
  * Preserva números decimais automotivos como hífens (ex: 1.0 -> 1-0, 1.4 -> 1-4).
+ * Higieniza entidades HTML e escapes (ex: d'água -> dagua, &#x27; -> removido).
  */
 export function gerarSlug(text: string): string {
   if (!text || typeof text !== "string") return "";
 
+  const decoded = decodificarEntidadesHtml(text);
+
   return (
-    text
+    decoded
       .toString()
       .normalize("NFD")
       .replace(/[\u0300-\u036f]/g, "") // Remove acentuações
@@ -379,11 +536,21 @@ export interface GerarSlugProdutoParams {
  * - "auto-pecas-cod-ml-", "cod-ml-", "auto-pecas-"
  * - Repetições da marca (ex: "nakata-nakata-cod-..." -> "amortecedor-nakata-...")
  * - Converte motores colados sem ponto (ex: hb20s-10 -> hb20s-1-0)
+ * - Remove resíduos de entidades HTML (ex: "d-x27-agua" -> "dagua")
+ * - Compacta anos sequenciais (ex: 87-88-89... -> 1987-a-2009)
+ * - Impede repetição da mesma palavra mais de duas vezes
+ * - Limita o tamanho máximo a 80 caracteres cortando na última palavra inteira
  */
 export function limparSlug(slugExistente: string): string {
   if (!slugExistente || typeof slugExistente !== "string") return "";
 
   let s = slugExistente.toLowerCase().trim();
+
+  // 0. Remove escapes e resíduos de entidades HTML em slugs existentes
+  // Trata d-x27-agua -> dagua
+  s = s.replace(/(^|-)d[-_]?x27[-_]?([a-z]+)(?=-|$)/g, "$1d$2");
+  s = s.replace(/(^|-)x27(-|$)/g, "$1$2");
+  s = s.replace(/(^|-)(amp|quot|nbsp|apos)(-|$)/g, "$1$2");
 
   // 1. Remove prefixos genéricos do início
   s = s.replace(/^auto-pecas-cod-ml-+/g, "");
@@ -402,20 +569,20 @@ export function limparSlug(slugExistente: string): string {
 
   // 3. Remove prefixos de ano ou código que tenham ficado no início antes do nome da peça
   // Ex: "2009-caixa-direcao-..." -> "caixa-direcao-..."
-  s = s.replace(/^(19\d\d|20\d\d)-(caixa|amortecedor|pastilha|kit|disco|radiador|cavalete|bateria|tulipa)/g, "$2");
+  s = s.replace(/^(19\d\d|20\d\d)-(caixa|amortecedor|pastilha|kit|disco|radiador|cavalete|bateria|tulipa|valvula|bomba)/g, "$2");
 
   // 4. Remove códigos longos duplicados no início (ex: "luk-619301500-619-3015-00-embreagem-original-luk-kit-embreagem..." -> "kit-embreagem...")
-  if (s.includes("-kit-") || s.includes("-amortecedor-") || s.includes("-pastilha-") || s.includes("-disco-")) {
+  if (s.includes("-kit-") || s.includes("-amortecedor-") || s.includes("-pastilha-") || s.includes("-disco-") || s.includes("-valvula-")) {
     s = s.replace(/^[a-z0-9-]+-(kit-[a-z0-9-]+)/, "$1");
   }
 
   // 5. Remove prefixos numéricos de quantidade antes de peças
   // Ex: "4-amortecedor-original-nakata..." -> "amortecedor-nakata..."
-  s = s.replace(/^(\d+x?)-(amortecedor|pastilha|disco|kit|par|jogo|vela|filtro|correia|bomba|radiador|tulipa)/g, "$2");
+  s = s.replace(/^(\d+x?)-(amortecedor|pastilha|disco|kit|par|jogo|vela|filtro|correia|bomba|radiador|tulipa|valvula)/g, "$2");
 
   // 6. Remove 'original' logo após a peça para deixar o slug mais semântico
   // Ex: "amortecedor-original-nakata..." -> "amortecedor-nakata..."
-  s = s.replace(/^(amortecedor|pastilha|disco|kit-embreagem|radiador|cavalete)-original-/g, "$1-");
+  s = s.replace(/^(amortecedor|pastilha|disco|kit-embreagem|radiador|cavalete|valvula-termostatica|bomba-dagua)-original-/g, "$1-");
 
   // 7. Remove repetições da marca ao longo do slug (ex: "nakata-...-nakata" -> apenas um "nakata")
   for (const m of MARCAS_AUTOMOTIVAS) {
@@ -431,7 +598,16 @@ export function limparSlug(slugExistente: string): string {
     return `-${engine[0]}-${engine[1]}-`;
   });
 
-  // 9. Remove hífens duplicados ou nas extremidades
+  // 9. Compacta anos sequenciais (ex: 87-88-89-90... -> 1987-a-2009)
+  s = compactarAnosSequenciais(s);
+
+  // 10. Impede repetição da mesma palavra mais de duas vezes
+  s = limitarRepeticaoPalavras(s, 2);
+
+  // 11. Limita o tamanho máximo do slug para 80 caracteres cortando na última palavra inteira
+  s = truncarSlug(s, 80);
+
+  // 12. Remove hífens duplicados ou nas extremidades
   s = s.replace(/-+/g, "-").replace(/^-+|-+$/g, "");
 
   return s;
@@ -453,7 +629,7 @@ export function gerarBaseSlugProduto(params: Omit<GerarSlugProdutoParams, "hash"
   }
 
   // 1. Normaliza texto do título preparando pontuação e motor
-  const tituloNormalizado = titulo
+  const tituloNormalizado = decodificarEntidadesHtml(titulo)
     .toString()
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
@@ -566,8 +742,9 @@ export function gerarBaseSlugProduto(params: Omit<GerarSlugProdutoParams, "hash"
 
   // 5. Extrai [codigo-opcional] (apenas se for código de fábrica autêntico)
   let codigoSlug = "";
-  if (isCodigoValido(codigo)) {
-    const cSlug = gerarSlug(codigo!);
+  const codLimpo = extrairCodigoFabricanteLimpo(codigo);
+  if (isCodigoValido(codLimpo)) {
+    const cSlug = gerarSlug(codLimpo);
     if (cSlug && !pecaSlug.includes(cSlug) && !modeloCarroSlug.includes(cSlug) && cSlug !== marcaSlug) {
       codigoSlug = cSlug;
     }
@@ -611,17 +788,19 @@ export function gerarSlugProduto(params: GerarSlugProdutoParams | string): strin
     return limparSlug(params);
   }
 
-  const baseSlug = gerarBaseSlugProduto(params);
   const { hash } = params;
 
   if (hash && typeof hash === "string" && hash.trim()) {
     const hashSlug = gerarSlug(hash).replace(/[^a-z0-9]/g, "").slice(-4);
     if (hashSlug && hashSlug.length >= 2) {
+      const maxBaseLen = 80 - hashSlug.length - 1;
+      const baseSlug = truncarSlug(gerarBaseSlugProduto(params), maxBaseLen);
       return limparSlug(`${baseSlug}-${hashSlug}`);
     }
   }
 
-  return baseSlug;
+  const baseSlug = gerarBaseSlugProduto(params);
+  return truncarSlug(baseSlug, 80);
 }
 
 /**
@@ -635,7 +814,7 @@ export async function gerarSlugUnicoNoBanco(
   produtoIdAtual?: string | null,
   mlIdAtual?: string | null
 ): Promise<string> {
-  const baseSlug = gerarBaseSlugProduto(params);
+  const baseSlug = truncarSlug(gerarBaseSlugProduto(params), 80);
 
   // Consulta se o slug base já existe no banco
   let query = supabase.from("produtos_afiliados").select("id, ml_id, slug").eq("slug", baseSlug);
@@ -657,7 +836,9 @@ export async function gerarSlugUnicoNoBanco(
     (params.hash ? params.hash.replace(/\D/g, "").slice(-4) : null) ||
     Date.now().toString().slice(-4);
 
-  const slugComHash = `${baseSlug}-${hashIdentificador}`;
+  const maxBaseLen = 80 - hashIdentificador.length - 1;
+  const baseTruncado = truncarSlug(baseSlug, maxBaseLen);
+  const slugComHash = `${baseTruncado}-${hashIdentificador}`;
 
   // Verifica se o slug com hash também colide
   const { data: colidindoComHash } = await supabase
@@ -673,7 +854,9 @@ export async function gerarSlugUnicoNoBanco(
 
   // Fallback extremo de colisão dupla
   const randomSuffix = Math.random().toString(36).substring(2, 6);
-  return `${baseSlug}-${hashIdentificador}-${randomSuffix}`;
+  const maxBaseDuplo = 80 - hashIdentificador.length - randomSuffix.length - 2;
+  const baseDuplo = truncarSlug(baseSlug, maxBaseDuplo);
+  return `${baseDuplo}-${hashIdentificador}-${randomSuffix}`;
 }
 
 export { gerarSlug as generateSlug };

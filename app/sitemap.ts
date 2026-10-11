@@ -1,11 +1,13 @@
 import { MetadataRoute } from "next";
 import { supabase } from "@/lib/supabase";
 
-export const dynamic = 'force-dynamic';
-export const revalidate = 0;
+export const revalidate = 3600; // Revalidação a cada 1 hora para inclusão automática de novos produtos
 
 export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
-const baseUrl = (process.env.NEXT_PUBLIC_SITE_URL || "https://hubmultimercado-vitrine.vercel.app").replace(/\/+$/, "");
+  const baseUrl = (
+    process.env.NEXT_PUBLIC_SITE_URL || "https://hubmultimercado-vitrine.vercel.app"
+  ).replace(/\/+$/, "");
+
   // 1. Rotas estáticas principais
   const routes: MetadataRoute.Sitemap = [
     {
@@ -22,27 +24,32 @@ const baseUrl = (process.env.NEXT_PUBLIC_SITE_URL || "https://hubmultimercado-vi
     },
   ];
 
-  // 2. Busca todas as URLs de peças (/peca/[slug]) existentes no Supabase
+  // 2. Busca todos os produtos ativos que possuam slug no Supabase (limite ampliado para 1000)
   try {
     const { data: produtos, error } = await supabase
       .from("produtos_afiliados")
       .select("slug, updated_at, created_at")
-      .not("slug", "is", null);
+      .not("slug", "is", null)
+      .limit(1000);
 
     if (!error && produtos && Array.isArray(produtos)) {
       for (const prod of produtos) {
-        if (!prod.slug) continue;
+        const cleanSlug = prod.slug?.trim();
+        if (!cleanSlug) continue;
 
         let lastModDate: Date;
         try {
-          lastModDate = prod.updated_at || prod.created_at ? new Date(prod.updated_at || prod.created_at) : new Date();
+          lastModDate =
+            prod.updated_at || prod.created_at
+              ? new Date(prod.updated_at || prod.created_at)
+              : new Date();
           if (isNaN(lastModDate.getTime())) lastModDate = new Date();
         } catch {
           lastModDate = new Date();
         }
 
         routes.push({
-          url: `${baseUrl}/peca/${encodeURIComponent(prod.slug)}`,
+          url: `${baseUrl}/peca/${cleanSlug}`,
           lastModified: lastModDate,
           changeFrequency: "daily",
           priority: 0.8,
@@ -55,3 +62,4 @@ const baseUrl = (process.env.NEXT_PUBLIC_SITE_URL || "https://hubmultimercado-vi
 
   return routes;
 }
+
