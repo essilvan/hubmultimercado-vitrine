@@ -14,18 +14,32 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
     auth: { persistSession: false }
   });
 
-  // Busca todos os registos sem filtros condicionais
-  const { data: produtos, error } = await supabase
-    .from('produtos_afiliados')
-    .select('slug, updated_at');
+  // Busca paginada para contornar qualquer teto do PostgREST
+  let allSlugs: { slug: string; updated_at?: string }[] = [];
+  let from = 0;
+  const step = 500;
+  let hasMore = true;
 
-  console.log('[DEBUG SITEMAP] Total retornado do Supabase:', produtos?.length);
+  while (hasMore) {
+    const { data, error } = await supabase
+      .from('produtos_afiliados')
+      .select('slug, updated_at')
+      .not('slug', 'is', null)
+      .range(from, from + step - 1);
 
-  if (error) {
-    console.error('[ERRO SUPABASE SITEMAP]:', error.message);
+    if (error || !data || data.length === 0) {
+      hasMore = false;
+    } else {
+      allSlugs = [...allSlugs, ...data];
+      if (data.length < step) {
+        hasMore = false;
+      } else {
+        from += step;
+      }
+    }
   }
 
-  const produtosUrls: MetadataRoute.Sitemap = (produtos || [])
+  const produtosUrls: MetadataRoute.Sitemap = allSlugs
     .filter((p) => p.slug && typeof p.slug === 'string' && p.slug.trim() !== '')
     .map((item) => ({
       url: `${baseUrl}/peca/${encodeURIComponent(item.slug.trim())}`,
@@ -33,8 +47,6 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
       changeFrequency: 'daily',
       priority: 0.8,
     }));
-
-  console.log('[DEBUG SITEMAP] Total de URLs de pecas geradas:', produtosUrls.length);
 
   return [
     {
