@@ -27,6 +27,8 @@ import {
   MessageSquare,
   CheckSquare,
   Square,
+  Building2,
+  Share2,
 } from "lucide-react";
 
 interface ItemOrcamento {
@@ -91,6 +93,108 @@ function formatarMoeda(valor: number): string {
     style: "currency",
     currency: "BRL",
   }).format(Number(num.toFixed(2)));
+}
+
+/**
+ * BOTÃO 1: Gera texto limpo e estruturado para a Visão Cliente Final (com preços e links)
+ */
+function gerarTextoClienteFinal(
+  resultado: OrcamentoResultado,
+  itensSelecionados: number[],
+  totalSelecionado: number
+): string {
+  const veic = resultado.veiculo;
+  const marca = veic?.marca || "";
+  const modelo = veic?.modelo || "";
+  const motor = veic?.motorizacao || "";
+  const ano = veic?.ano || "";
+  const veiculoTexto = [marca, modelo, motor, ano].filter(Boolean).join(" ") || resultado.veiculo_detectado || "Veículo não especificado";
+  const placaTexto = veic?.placa?.trim() ? ` | Placa: ${veic.placa.trim()}` : "";
+
+  let msg = `🚗 *ORÇAMENTO DE PEÇAS*\n`;
+  msg += `*Veículo:* ${veiculoTexto}${placaTexto}\n\n`;
+  msg += `📋 *Itens Selecionados (${itensSelecionados.length}):*\n\n`;
+
+  const itensParaEnviar = resultado.itens.filter((_, idx) => itensSelecionados.includes(idx));
+
+  if (itensParaEnviar.length === 0) {
+    msg += `(Nenhuma peça selecionada)\n`;
+  } else {
+    itensParaEnviar.forEach((item, index) => {
+      const qtd = Number(item.quantidade) || 1;
+      const nome = item.peca_padronizada || item.nome_peca || "Peça";
+      const posicao = item.posicao ? ` (${item.posicao})` : "";
+      const marcaItem = item.marca_preferencial || item.marca_recomendada || item.marca || "Original / Homologada";
+      const precoNum = Number(item.preco ?? item.preco_real_ml) || 0;
+      const subtotal = qtd * precoNum;
+
+      const precoUnitTxt = precoNum > 0 ? formatarMoeda(precoNum) : "Sob Consulta";
+      const valorLinha = qtd > 1 && precoNum > 0
+        ? `${qtd}x de ${precoUnitTxt} = ${formatarMoeda(subtotal)}`
+        : precoUnitTxt;
+
+      let link = item.link || item.link_anuncio || item.link_direto_anuncio || "";
+      if (link && link.startsWith("/")) {
+        link = `https://hubmultimercado-vitrine.vercel.app${link}`;
+      }
+
+      msg += `${index + 1}. *${qtd}x - ${nome}${posicao}*\n`;
+      msg += `   • Marca Recomendada: ${marcaItem}\n`;
+      msg += `   • Preço: ${valorLinha}\n`;
+      if (link) {
+        msg += `   • Link de Compra: ${link}\n`;
+      }
+      msg += `\n`;
+    });
+  }
+
+  if (totalSelecionado > 0) {
+    msg += `💰 *TOTAL GERAL ESTIMADO: ${formatarMoeda(totalSelecionado)}*\n`;
+  }
+
+  return msg.trim();
+}
+
+/**
+ * BOTÃO 2: Gera lista técnica SEM PREÇOS, SEM LINKS e SEM TEXTO PUBLICITÁRIO para cotação B2B de balcão
+ */
+function gerarTextoFornecedores(
+  resultado: OrcamentoResultado,
+  itensSelecionados: number[]
+): string {
+  const veic = resultado.veiculo;
+  const marca = veic?.marca || "";
+  const modelo = veic?.modelo || "";
+  const motor = veic?.motorizacao || "";
+  const ano = veic?.ano || "";
+  const veiculoTexto = [marca, modelo, motor, ano].filter(Boolean).join(" ") || resultado.veiculo_detectado || "Veículo não especificado";
+  const placa = veic?.placa?.trim() || "N/I";
+
+  const itensParaEnviar = resultado.itens.filter((_, idx) => itensSelecionados.includes(idx));
+
+  let msg = `📋 COTAÇÃO DE PEÇAS\n`;
+  msg += `Veículo: ${veiculoTexto}\n`;
+  msg += `Placa: ${placa}\n\n`;
+  msg += `Itens Solicitados:\n`;
+
+  if (itensParaEnviar.length === 0) {
+    msg += `(Nenhuma peça selecionada)\n`;
+  } else {
+    itensParaEnviar.forEach((item, index) => {
+      const qtd = Number(item.quantidade) || 1;
+      const nome = item.peca_padronizada || item.nome_peca || "Peça";
+      const posicao = item.posicao ? ` (${item.posicao})` : "";
+      const marcaSugestao =
+        item.marca_preferencial ||
+        item.marca_recomendada ||
+        item.marca ||
+        "Original / Primeira Linha";
+      msg += `${index + 1}. ${qtd}x - ${nome}${posicao} - Sugestão: ${marcaSugestao}\n`;
+    });
+  }
+
+  msg += `\nFavor informar disponibilidade e valores.`;
+  return msg;
 }
 
 /**
@@ -160,12 +264,13 @@ export default function OrcamentoPage() {
 
   const [isLoading, setIsLoading] = useState(false);
   const [resultado, setResultado] = useState<OrcamentoResultado | null>(null);
+  const [itensSelecionados, setItensSelecionados] = useState<number[]>([]);
   const [aviso, setAviso] = useState<string | null>(null);
   const [erro, setErro] = useState<string | null>(null);
   const [avisoPopup, setAvisoPopup] = useState(false);
   const [modalFechamentoAberto, setModalFechamentoAberto] = useState(false);
-  const [itensSelecionados, setItensSelecionados] = useState<number[]>([]);
-  const [copiadoFeedback, setCopiadoFeedback] = useState(false);
+  const [copiadoCliente, setCopiadoCliente] = useState(false);
+  const [copiadoFornecedor, setCopiadoFornecedor] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const cameraInputRef = useRef<HTMLInputElement | null>(null);
@@ -299,65 +404,43 @@ export default function OrcamentoPage() {
     }
   };
 
-  // Gera o texto estruturado para envio no WhatsApp e cópia para a área de transferência
-  const gerarTextoCotacao = () => {
-    if (!resultado) return "";
-    const veic = resultado.veiculo;
-    const veicTexto = veic
-      ? [veic.marca, veic.modelo, veic.motorizacao, veic.ano].filter(Boolean).join(" ")
-      : resultado.veiculo_detectado || "Veículo não especificado";
-
-    const placaTexto = veic?.placa ? ` | Placa: ${veic.placa}` : "";
-
-    let textoMsg = `🚗 *Orçamento de Peças - ${veicTexto}${placaTexto}*\n\n`;
-    textoMsg += `📋 *Peças Selecionadas (${itensSelecionados.length} itens):*\n`;
-
-    const itensParaEnviar = resultado.itens.filter((_, idx) => itensSelecionados.includes(idx));
-
-    if (itensParaEnviar.length === 0) {
-      textoMsg += `(Nenhuma peça selecionada)\n`;
-    } else {
-      itensParaEnviar.forEach((item, index) => {
-        const qtd = Number(item.quantidade) || 1;
-        const pos = item.posicao ? ` (${item.posicao})` : "";
-        const marca =
-          item.marca_preferencial || item.marca_recomendada
-            ? ` - Marca: ${item.marca_preferencial || item.marca_recomendada}`
-            : "";
-        const precoNum = Number(item.preco ?? item.preco_real_ml) || 0;
-        const subtotal = qtd * precoNum;
-        const precoTxt = precoNum > 0
-          ? (qtd > 1 ? ` - ${qtd}x de ${formatarMoeda(precoNum)} = ${formatarMoeda(subtotal)}` : ` - ${formatarMoeda(precoNum)}`)
-          : "";
-        const link = item.link_anuncio || item.link_direto_anuncio || item.link;
-        const linkTxt = link ? `\n   🔗 ${link}` : "";
-
-        textoMsg += `${index + 1}. *${qtd > 1 ? `${qtd}x ` : "1x "}${item.peca_padronizada || item.nome_peca}*${pos}${marca}${precoTxt}${linkTxt}\n`;
-      });
-    }
-
-    if (totalSelecionado > 0) {
-      textoMsg += `\n💰 *Total Estimado das Peças Selecionadas:* ${totalFormatado}\n`;
-    }
-
-    textoMsg += `\nCotado com preços reais e frete Full no Mercado Livre via PeçasFinder`;
-    return textoMsg;
-  };
-
-  const handleEnviarWhatsApp = () => {
-    const msg = gerarTextoCotacao();
+  // Handlers para Compartilhamento (Visão Cliente Final)
+  const handleEnviarWhatsAppCliente = () => {
+    if (!resultado) return;
+    const msg = gerarTextoClienteFinal(resultado, itensSelecionados, totalSelecionado);
     const url = `https://wa.me/?text=${encodeURIComponent(msg)}`;
     window.open(url, "_blank");
   };
 
-  const handleCopiarLista = async () => {
-    const msg = gerarTextoCotacao();
+  const handleCopiarCliente = async () => {
+    if (!resultado) return;
+    const msg = gerarTextoClienteFinal(resultado, itensSelecionados, totalSelecionado);
     try {
       await navigator.clipboard.writeText(msg);
-      setCopiadoFeedback(true);
-      setTimeout(() => setCopiadoFeedback(false), 3000);
+      setCopiadoCliente(true);
+      setTimeout(() => setCopiadoCliente(false), 3000);
     } catch (err) {
-      console.error("Erro ao copiar para a área de transferência:", err);
+      console.error("Erro ao copiar orçamento:", err);
+    }
+  };
+
+  // Handlers para Envio a Fornecedores (Visão Balcão / Cotação B2B)
+  const handleEnviarWhatsAppFornecedores = () => {
+    if (!resultado) return;
+    const msg = gerarTextoFornecedores(resultado, itensSelecionados);
+    const url = `https://wa.me/?text=${encodeURIComponent(msg)}`;
+    window.open(url, "_blank");
+  };
+
+  const handleCopiarFornecedores = async () => {
+    if (!resultado) return;
+    const msg = gerarTextoFornecedores(resultado, itensSelecionados);
+    try {
+      await navigator.clipboard.writeText(msg);
+      setCopiadoFornecedor(true);
+      setTimeout(() => setCopiadoFornecedor(false), 3000);
+    } catch (err) {
+      console.error("Erro ao copiar lista para fornecedores:", err);
     }
   };
 
@@ -769,14 +852,25 @@ Peças:
                 <table className="w-full text-left border-collapse">
                   <thead>
                     <tr className="border-b border-zinc-200 dark:border-zinc-800 bg-zinc-50/70 dark:bg-zinc-950/70 text-[11px] font-bold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
-                      <th className="py-4 px-6">Peça e Anúncio Encontrado</th>
-                      <th className="py-4 px-6 w-48">Marca Recomendada</th>
-                      <th className="py-4 px-6 w-40 text-right">Preço Real ML</th>
-                      <th className="py-4 px-6 w-52 text-center">Melhor Oferta</th>
+                      <th className="py-3.5 px-4 w-12 text-center">
+                        <input
+                          type="checkbox"
+                          checked={resultado.itens.length > 0 && itensSelecionados.length === resultado.itens.length}
+                          onChange={handleToggleTodos}
+                          className="w-4 h-4 rounded border-zinc-300 text-emerald-600 focus:ring-emerald-500 cursor-pointer accent-emerald-500"
+                          title="Selecionar / Desmarcar todos"
+                        />
+                      </th>
+                      <th className="py-3.5 px-3 w-16 text-center">Qtd</th>
+                      <th className="py-3.5 px-4">Nome da Peça</th>
+                      <th className="py-3.5 px-4 w-44">Marca Sugerida</th>
+                      <th className="py-3.5 px-4 w-36 text-right">Preço</th>
+                      <th className="py-3.5 px-4 w-36 text-center">Ação</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800 text-sm">
                     {resultado.itens.map((item, idx) => {
+                      const isChecked = itensSelecionados.includes(idx);
                       const termoBusca =
                         item.termo_busca_mercadolivre ||
                         item.query_busca ||
@@ -793,17 +887,39 @@ Peças:
                         item.marca_preferencial ||
                         item.marca_recomendada ||
                         "Original / Homologada";
+                      const qtd = Number(item.quantidade) || 1;
+                      const precoUnit = Number(item.preco ?? item.preco_real_ml) || 0;
+                      const subtotal = qtd * precoUnit;
 
                       return (
                         <tr
                           key={idx}
-                          className="hover:bg-zinc-50/50 dark:hover:bg-zinc-800/40 transition-colors"
+                          className={`hover:bg-zinc-50/70 dark:hover:bg-zinc-800/40 transition-colors ${
+                            !isChecked ? "opacity-60 bg-zinc-50/30 dark:bg-zinc-950/20" : ""
+                          }`}
                         >
-                          {/* 1. Nome da Peça, Thumbnail e Detalhes do ML */}
-                          <td className="py-4 px-6 align-middle">
-                            <div className="flex items-start gap-3.5">
+                          {/* 1. Checkbox */}
+                          <td className="py-3.5 px-4 text-center align-middle">
+                            <input
+                              type="checkbox"
+                              checked={isChecked}
+                              onChange={() => handleToggleItem(idx)}
+                              className="w-4 h-4 rounded border-zinc-300 text-emerald-600 focus:ring-emerald-500 cursor-pointer accent-emerald-500"
+                            />
+                          </td>
+
+                          {/* 2. Qtd */}
+                          <td className="py-3.5 px-3 text-center align-middle">
+                            <span className="inline-block px-2 py-0.5 text-xs font-bold font-mono rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-800 dark:text-zinc-200 border border-zinc-200 dark:border-zinc-700">
+                              {qtd}x
+                            </span>
+                          </td>
+
+                          {/* 3. Nome da Peça */}
+                          <td className="py-3.5 px-4 align-middle">
+                            <div className="flex items-center gap-3">
                               {item.thumbnail ? (
-                                <div className="w-12 h-12 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-white flex items-center justify-center overflow-hidden shrink-0 shadow-xs">
+                                <div className="w-10 h-10 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white flex items-center justify-center overflow-hidden shrink-0 shadow-xs">
                                   {/* eslint-disable-next-line @next/next/no-img-element */}
                                   <img
                                     src={item.thumbnail}
@@ -814,13 +930,8 @@ Peças:
                               ) : null}
 
                               <div className="min-w-0 flex-1">
-                                <div className="font-bold text-zinc-900 dark:text-zinc-100 leading-snug flex items-center flex-wrap gap-2">
+                                <div className="font-bold text-sm text-zinc-900 dark:text-zinc-100 leading-tight flex items-center flex-wrap gap-1.5">
                                   <span>{item.peca_padronizada || item.nome_peca}</span>
-                                  {item.quantidade && item.quantidade > 1 ? (
-                                    <span className="px-1.5 py-0.5 text-[10px] font-bold rounded bg-zinc-100 dark:bg-zinc-800 text-zinc-700 dark:text-zinc-300 border border-zinc-200 dark:border-zinc-700">
-                                      {item.quantidade}x
-                                    </span>
-                                  ) : null}
                                   {item.posicao && (
                                     <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-blue-50 dark:bg-blue-950/50 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800/60">
                                       {item.posicao}
@@ -828,21 +939,15 @@ Peças:
                                   )}
                                   {item.tem_full && (
                                     <span className="px-1.5 py-0.5 text-[10px] font-bold rounded bg-amber-100 dark:bg-amber-950 text-amber-900 dark:text-amber-300 border border-amber-300 dark:border-amber-800 flex items-center gap-0.5">
-                                      <Zap className="w-3 h-3 fill-amber-500 text-amber-500" />
+                                      <Zap className="w-2.5 h-2.5 fill-amber-500 text-amber-500" />
                                       <span>Full</span>
                                     </span>
                                   )}
                                 </div>
 
                                 {item.titulo_anuncio && item.titulo_anuncio !== item.peca_padronizada && (
-                                  <div className="text-[11px] text-zinc-500 dark:text-zinc-400 line-clamp-1 mt-0.5">
+                                  <div className="text-[11px] text-zinc-500 dark:text-zinc-400 truncate mt-0.5 max-w-md">
                                     {item.titulo_anuncio}
-                                  </div>
-                                )}
-
-                                {item.termo_lido && (
-                                  <div className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-0.5">
-                                    Lido no orçamento: &quot;{item.termo_lido}&quot;
                                   </div>
                                 )}
 
@@ -866,54 +971,45 @@ Peças:
                             </div>
                           </td>
 
-                          {/* 2. Marca Recomendada */}
-                          <td className="py-4 px-6 align-middle">
-                            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-bold bg-amber-50 dark:bg-amber-950/40 text-amber-900 dark:text-amber-300 border border-amber-200 dark:border-amber-800">
-                              <ShieldCheck className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
-                              {marcaNome}
+                          {/* 4. Marca Sugerida */}
+                          <td className="py-3.5 px-4 align-middle">
+                            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold bg-amber-50 dark:bg-amber-950/40 text-amber-900 dark:text-amber-300 border border-amber-200/80 dark:border-amber-800/80">
+                              <ShieldCheck className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 shrink-0" />
+                              <span className="truncate max-w-[130px]">{marcaNome}</span>
                             </span>
                           </td>
 
-                          {/* 3. Preço Real do Mercado Livre */}
-                          <td className="py-4 px-6 align-middle text-right">
-                            {(() => {
-                              const qtd = Number(item.quantidade) || 1;
-                              const precoUnit = Number(item.preco ?? item.preco_real_ml) || 0;
-                              const subtotal = qtd * precoUnit;
-
-                              return (
-                                <>
-                                  <span className="font-mono font-black text-emerald-600 dark:text-emerald-400 text-sm block">
-                                    {subtotal > 0
-                                      ? formatarMoeda(subtotal)
-                                      : (item.preco_formatado || item.preco_medio || "Sob Consulta")}
+                          {/* 5. Preço */}
+                          <td className="py-3.5 px-4 align-middle text-right font-mono">
+                            {precoUnit > 0 ? (
+                              <div>
+                                <span className="font-bold text-sm text-emerald-600 dark:text-emerald-400 block leading-tight">
+                                  {formatarMoeda(subtotal)}
+                                </span>
+                                {qtd > 1 && (
+                                  <span className="text-[10px] text-zinc-400 block">
+                                    {qtd}x de {formatarMoeda(precoUnit)}
                                   </span>
-                                  {qtd > 1 && precoUnit > 0 ? (
-                                    <span className="text-[11px] text-zinc-400 block">
-                                      {qtd}x de {formatarMoeda(precoUnit)}
-                                    </span>
-                                  ) : null}
-                                  {precoUnit > 0 ? (
-                                    <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-700 dark:text-emerald-300 bg-emerald-100 dark:bg-emerald-950/80 px-2 py-0.5 rounded-full border border-emerald-300 dark:border-emerald-800/80 mt-1">
-                                      ✓ Preço Real ML
-                                    </span>
-                                  ) : null}
-                                </>
-                              );
-                            })()}
+                                )}
+                              </div>
+                            ) : (
+                              <span className="text-xs text-zinc-400 font-sans">
+                                Sob Consulta
+                              </span>
+                            )}
                           </td>
 
-                          {/* 4. Botão de Compra / Ver no ML */}
-                          <td className="py-4 px-6 align-middle text-center">
+                          {/* 6. Botão sutil "Ver Oferta" */}
+                          <td className="py-3.5 px-4 align-middle text-center">
                             <a
                               href={directUrl}
                               target="_blank"
                               rel="noopener noreferrer"
-                              className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 active:bg-emerald-600 text-zinc-950 font-bold text-xs shadow-md hover:shadow-lg transition-all transform active:scale-95 cursor-pointer w-full"
-                              title={`Ver "${item.peca_padronizada}" no Mercado Livre`}
+                              className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-xl bg-zinc-100 hover:bg-emerald-500 hover:text-zinc-950 dark:bg-zinc-800 dark:hover:bg-emerald-400 dark:hover:text-zinc-950 text-zinc-700 dark:text-zinc-300 text-xs font-semibold transition cursor-pointer border border-zinc-200 dark:border-zinc-700 group"
+                              title={`Ver oferta de "${item.peca_padronizada || item.nome_peca}"`}
                             >
-                              <Zap className="w-3.5 h-3.5 fill-zinc-950" />
-                              <span>{item.tem_full ? "Ver Anúncio Full ➔" : "Ver no Mercado Livre ➔"}</span>
+                              <span>Ver Oferta</span>
+                              <ExternalLink className="w-3 h-3 group-hover:translate-x-0.5 transition-transform" />
                             </a>
                           </td>
                         </tr>
@@ -923,56 +1019,176 @@ Peças:
                 </table>
               </div>
 
-              {/* Rodapé da Área de Resultado */}
-              <div className="p-6 bg-zinc-50/50 dark:bg-zinc-950/50 border-t border-zinc-200 dark:border-zinc-800 flex flex-col sm:flex-row items-center justify-between gap-4">
-                <div className="text-xs text-zinc-500">
-                  Preços reais obtidos de anúncios ativos no Mercado Livre.
+              {/* Rodapé da Tabela: Resumo e Compartilhamento Lado a Lado */}
+              <div className="p-6 bg-zinc-50/50 dark:bg-zinc-950/50 border-t border-zinc-200 dark:border-zinc-800 space-y-6">
+                {/* Linha superior com status de seleção e botões auxiliares */}
+                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                  <div className="flex items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={handleToggleTodos}
+                      className="text-xs font-bold text-zinc-700 dark:text-zinc-300 hover:text-emerald-600 dark:hover:text-emerald-400 flex items-center gap-1.5 cursor-pointer"
+                    >
+                      {itensSelecionados.length === resultado.itens.length ? (
+                        <CheckSquare className="w-4 h-4 text-emerald-500" />
+                      ) : (
+                        <Square className="w-4 h-4 text-zinc-400" />
+                      )}
+                      <span>
+                        {itensSelecionados.length === resultado.itens.length
+                          ? "Desmarcar todos"
+                          : "Selecionar todos"}
+                      </span>
+                    </button>
+                    <span className="text-zinc-300 dark:text-zinc-700">|</span>
+                    <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                      <strong className="text-zinc-900 dark:text-white font-mono">{itensSelecionados.length}</strong> de{" "}
+                      <strong className="font-mono">{resultado.itens.length}</strong> selecionadas
+                    </span>
+                    {totalSelecionado > 0 && (
+                      <>
+                        <span className="text-zinc-300 dark:text-zinc-700">|</span>
+                        <span className="text-xs font-bold font-mono text-emerald-600 dark:text-emerald-400">
+                          Total: {totalFormatado}
+                        </span>
+                      </>
+                    )}
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2.5">
+                    <button
+                      type="button"
+                      onClick={handleVerKitCompleto}
+                      className="px-3.5 py-2 rounded-xl bg-amber-400 hover:bg-amber-300 text-zinc-950 text-xs font-bold transition shadow-xs cursor-pointer flex items-center gap-1.5 transform active:scale-95"
+                      title="Pesquisar todas as peças agrupadas em um kit completo no Mercado Livre"
+                    >
+                      <Package className="w-4 h-4 text-zinc-950" />
+                      <span>Ver Kit Completo no ML</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setResultado(null);
+                        setTexto("");
+                        handleClearImage();
+                        setAvisoPopup(false);
+                        setModalFechamentoAberto(false);
+                      }}
+                      className="px-3.5 py-2 rounded-xl text-xs font-semibold text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200 dark:hover:bg-zinc-800 transition cursor-pointer"
+                    >
+                      Fazer Nova Cotação
+                    </button>
+                  </div>
                 </div>
 
-                <div className="flex flex-wrap items-center gap-3">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setResultado(null);
-                      setTexto("");
-                      handleClearImage();
-                      setAvisoPopup(false);
-                      setModalFechamentoAberto(false);
-                    }}
-                    className="px-4 py-2 rounded-xl text-xs font-semibold text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200 dark:hover:bg-zinc-800 transition cursor-pointer"
-                  >
-                    Fazer Nova Cotação
-                  </button>
+                {/* Bloco de Compartilhamento Lado a Lado: Cliente Final vs Fornecedores (B2B) */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2 border-t border-zinc-200 dark:border-zinc-800">
+                  {/* BOTÃO 1: Compartilhar Orçamento (Visão Cliente Final) */}
+                  <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl p-4 sm:p-5 flex flex-col justify-between gap-4 shadow-xs">
+                    <div className="space-y-1.5">
+                      <div className="flex items-center gap-2.5">
+                        <div className="w-8 h-8 rounded-lg bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 flex items-center justify-center shrink-0">
+                          <Share2 className="w-4 h-4" />
+                        </div>
+                        <div>
+                          <h4 className="font-bold text-sm text-zinc-900 dark:text-white leading-tight">
+                            Compartilhar Orçamento
+                          </h4>
+                          <span className="text-[11px] font-semibold text-emerald-600 dark:text-emerald-400">
+                            Visão Cliente Final
+                          </span>
+                        </div>
+                      </div>
+                      <p className="text-xs text-zinc-500 dark:text-zinc-400 leading-relaxed">
+                        Lista detalhada com dados do veículo, preços unitários, links diretos de compra e total estimado.
+                      </p>
+                    </div>
 
-                  <button
-                    type="button"
-                    onClick={() => setModalFechamentoAberto(true)}
-                    className="px-5 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-zinc-950 text-xs font-black transition shadow-md hover:shadow-lg cursor-pointer flex items-center gap-2 transform active:scale-95"
-                    title="Abrir checklist de fechamento"
-                  >
-                    <ShoppingBag className="w-4 h-4" />
-                    <span>Fechar Orçamento Completo</span>
-                  </button>
+                    <div className="flex flex-col sm:flex-row items-stretch gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={handleEnviarWhatsAppCliente}
+                        className="flex-1 py-2.5 px-3.5 rounded-xl bg-[#25D366] hover:bg-[#20ba5a] text-zinc-950 font-bold text-xs flex items-center justify-center gap-2 shadow-xs hover:shadow-md transition cursor-pointer transform active:scale-95"
+                        title="Enviar orçamento detalhado com preços e links via WhatsApp"
+                      >
+                        <MessageSquare className="w-4 h-4 text-zinc-950 fill-zinc-950 shrink-0" />
+                        <span>Enviar WhatsApp</span>
+                      </button>
 
-                  <button
-                    type="button"
-                    onClick={handleVerKitCompleto}
-                    className="px-4 py-2.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-zinc-950 text-xs font-bold transition shadow-md hover:shadow-lg cursor-pointer flex items-center gap-2 transform active:scale-95"
-                    title="Pesquisar todas as peças agrupadas em um kit completo no Mercado Livre"
-                  >
-                    <Package className="w-4 h-4 text-zinc-950" />
-                    <span>Ver Kit Completo no Mercado Livre</span>
-                  </button>
+                      <button
+                        type="button"
+                        onClick={handleCopiarCliente}
+                        className="flex-1 py-2.5 px-3.5 rounded-xl bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-700/80 text-zinc-800 dark:text-zinc-200 font-bold text-xs flex items-center justify-center gap-2 shadow-xs transition cursor-pointer transform active:scale-95"
+                        title="Copiar orçamento com preços e links para a área de transferência"
+                      >
+                        {copiadoCliente ? (
+                          <>
+                            <Check className="w-4 h-4 text-emerald-500 shrink-0" />
+                            <span className="text-emerald-600 dark:text-emerald-400">Orçamento Copiado!</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-4 h-4 text-zinc-500 shrink-0" />
+                            <span>Copiar Orçamento</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </div>
 
-                  <button
-                    type="button"
-                    onClick={handleClick}
-                    className="px-5 py-2.5 rounded-xl bg-zinc-900 dark:bg-white text-white dark:text-zinc-900 text-xs font-bold transition shadow-md cursor-pointer flex items-center gap-1.5"
-                    title="Abre abas individuais para cada peça no Mercado Livre"
-                  >
-                    <ExternalLink className="w-3.5 h-3.5" />
-                    <span>Abrir todas as peças ({resultado.itens.length}) em abas separadas</span>
-                  </button>
+                  {/* BOTÃO 2: Enviar para Fornecedores (Visão Balcão / Cotação B2B) */}
+                  <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl p-4 sm:p-5 flex flex-col justify-between gap-4 shadow-xs">
+                    <div className="space-y-1.5">
+                      <div className="flex items-center gap-2.5">
+                        <div className="w-8 h-8 rounded-lg bg-blue-500/10 text-blue-600 dark:text-blue-400 flex items-center justify-center shrink-0">
+                          <Building2 className="w-4 h-4" />
+                        </div>
+                        <div>
+                          <h4 className="font-bold text-sm text-zinc-900 dark:text-white leading-tight">
+                            Enviar para Fornecedores
+                          </h4>
+                          <span className="text-[11px] font-semibold text-blue-600 dark:text-blue-400">
+                            Visão Balcão / Cotação B2B
+                          </span>
+                        </div>
+                      </div>
+                      <p className="text-xs text-zinc-500 dark:text-zinc-400 leading-relaxed">
+                        Lista limpa sem preços e sem links comerciais, formatada exatamente para cotar em autopeças.
+                      </p>
+                    </div>
+
+                    <div className="flex flex-col sm:flex-row items-stretch gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={handleEnviarWhatsAppFornecedores}
+                        className="flex-1 py-2.5 px-3.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-xs hover:shadow-md transition cursor-pointer transform active:scale-95"
+                        title="Enviar cotação limpa sem preços para fornecedores via WhatsApp"
+                      >
+                        <MessageSquare className="w-4 h-4 text-white fill-white shrink-0" />
+                        <span>Cotar via WhatsApp</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={handleCopiarFornecedores}
+                        className="flex-1 py-2.5 px-3.5 rounded-xl bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-700/80 text-zinc-800 dark:text-zinc-200 font-bold text-xs flex items-center justify-center gap-2 shadow-xs transition cursor-pointer transform active:scale-95"
+                        title="Copiar lista de cotação sem preços para a área de transferência"
+                      >
+                        {copiadoFornecedor ? (
+                          <>
+                            <Check className="w-4 h-4 text-emerald-500 shrink-0" />
+                            <span className="text-emerald-600 dark:text-emerald-400">Lista Copiada!</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-4 h-4 text-zinc-500 shrink-0" />
+                            <span>Copiar Lista para Fornecedores</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -1201,44 +1417,113 @@ Peças:
                   </div>
                 </div>
 
-                {/* Feedback de Cópia */}
-                {copiadoFeedback && (
-                  <div className="p-2.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-200 dark:border-emerald-800 text-xs font-semibold text-emerald-700 dark:text-emerald-300 flex items-center justify-center gap-2 animate-in fade-in duration-200">
-                    <Check className="w-4 h-4 text-emerald-500" />
-                    <span>Lista de peças e orçamento copiada com sucesso! Pronto para colar.</span>
+                {/* Bloco de Compartilhamento Lado a Lado: Cliente Final vs Fornecedores (B2B) */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5 pt-1">
+                  {/* BOTÃO 1: Compartilhar Orçamento (Visão Cliente Final) */}
+                  <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl p-4 flex flex-col justify-between gap-3 shadow-xs">
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2">
+                        <div className="w-7 h-7 rounded-lg bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 flex items-center justify-center shrink-0">
+                          <Share2 className="w-3.5 h-3.5" />
+                        </div>
+                        <div>
+                          <h4 className="font-bold text-xs sm:text-sm text-zinc-900 dark:text-white leading-tight">
+                            Compartilhar Orçamento
+                          </h4>
+                          <span className="text-[10px] font-semibold text-emerald-600 dark:text-emerald-400">
+                            Visão Cliente Final
+                          </span>
+                        </div>
+                      </div>
+                      <p className="text-[11px] text-zinc-500 dark:text-zinc-400 leading-normal">
+                        Preços unitários, links diretos de compra e total estimado.
+                      </p>
+                    </div>
+
+                    <div className="flex items-stretch gap-2">
+                      <button
+                        type="button"
+                        onClick={handleEnviarWhatsAppCliente}
+                        className="flex-1 py-2.5 px-3 rounded-xl bg-[#25D366] hover:bg-[#20ba5a] text-zinc-950 font-bold text-xs flex items-center justify-center gap-1.5 shadow-xs transition cursor-pointer transform active:scale-95"
+                        title="Enviar orçamento detalhado com preços e links via WhatsApp"
+                      >
+                        <MessageSquare className="w-3.5 h-3.5 text-zinc-950 fill-zinc-950 shrink-0" />
+                        <span>WhatsApp</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={handleCopiarCliente}
+                        className="flex-1 py-2.5 px-3 rounded-xl bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-700/80 text-zinc-800 dark:text-zinc-200 font-bold text-xs flex items-center justify-center gap-1.5 shadow-xs transition cursor-pointer transform active:scale-95"
+                        title="Copiar orçamento com preços e links para a área de transferência"
+                      >
+                        {copiadoCliente ? (
+                          <>
+                            <Check className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                            <span className="text-emerald-600 dark:text-emerald-400">Copiado!</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
+                            <span>Copiar</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
                   </div>
-                )}
 
-                {/* Ações: Cotar WhatsApp + Copiar Lista */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <button
-                    type="button"
-                    onClick={handleEnviarWhatsApp}
-                    className="w-full py-3.5 px-4 rounded-xl bg-[#25D366] hover:bg-[#20ba5a] text-zinc-950 font-black text-xs sm:text-sm flex items-center justify-center gap-2 shadow-md hover:shadow-lg transition cursor-pointer transform active:scale-95"
-                    title="Enviar orçamento com as peças selecionadas no WhatsApp"
-                  >
-                    <MessageSquare className="w-4 h-4 text-zinc-950 fill-zinc-950" />
-                    <span>Cotar via WhatsApp</span>
-                  </button>
+                  {/* BOTÃO 2: Enviar para Fornecedores (Visão Balcão / Cotação B2B) */}
+                  <div className="bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 rounded-2xl p-4 flex flex-col justify-between gap-3 shadow-xs">
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2">
+                        <div className="w-7 h-7 rounded-lg bg-blue-500/10 text-blue-600 dark:text-blue-400 flex items-center justify-center shrink-0">
+                          <Building2 className="w-3.5 h-3.5" />
+                        </div>
+                        <div>
+                          <h4 className="font-bold text-xs sm:text-sm text-zinc-900 dark:text-white leading-tight">
+                            Enviar para Fornecedores
+                          </h4>
+                          <span className="text-[10px] font-semibold text-blue-600 dark:text-blue-400">
+                            Visão Balcão / Cotação B2B
+                          </span>
+                        </div>
+                      </div>
+                      <p className="text-[11px] text-zinc-500 dark:text-zinc-400 leading-normal">
+                        Lista limpa sem preços e sem links para balcão de autopeças.
+                      </p>
+                    </div>
 
-                  <button
-                    type="button"
-                    onClick={handleCopiarLista}
-                    className="w-full py-3.5 px-4 rounded-xl bg-zinc-900 dark:bg-white text-white dark:text-zinc-900 hover:opacity-90 font-bold text-xs sm:text-sm flex items-center justify-center gap-2 shadow-md transition cursor-pointer transform active:scale-95"
-                    title="Copiar lista formatada para a área de transferência"
-                  >
-                    {copiadoFeedback ? (
-                      <>
-                        <Check className="w-4 h-4 text-emerald-500" />
-                        <span>Lista Copiada!</span>
-                      </>
-                    ) : (
-                      <>
-                        <Copy className="w-4 h-4" />
-                        <span>Copiar Lista para Orçamento</span>
-                      </>
-                    )}
-                  </button>
+                    <div className="flex items-stretch gap-2">
+                      <button
+                        type="button"
+                        onClick={handleEnviarWhatsAppFornecedores}
+                        className="flex-1 py-2.5 px-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-xs transition cursor-pointer transform active:scale-95"
+                        title="Enviar cotação limpa sem preços para fornecedores via WhatsApp"
+                      >
+                        <MessageSquare className="w-3.5 h-3.5 text-white fill-white shrink-0" />
+                        <span>WhatsApp</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={handleCopiarFornecedores}
+                        className="flex-1 py-2.5 px-3 rounded-xl bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 hover:bg-zinc-100 dark:hover:bg-zinc-700/80 text-zinc-800 dark:text-zinc-200 font-bold text-xs flex items-center justify-center gap-1.5 shadow-xs transition cursor-pointer transform active:scale-95"
+                        title="Copiar lista de cotação sem preços para a área de transferência"
+                      >
+                        {copiadoFornecedor ? (
+                          <>
+                            <Check className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                            <span className="text-emerald-600 dark:text-emerald-400">Copiada!</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
+                            <span>Copiar</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
