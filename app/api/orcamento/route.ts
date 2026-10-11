@@ -26,6 +26,8 @@ export interface ItemOrcamento {
   preco?: number | null;
   preco_real_ml?: number | null;
   preco_formatado?: string | null;
+  link?: string | null;
+  marca?: string | null;
   titulo_anuncio?: string | null;
   link_anuncio?: string | null;
   tem_full?: boolean;
@@ -122,6 +124,15 @@ export type { OfertaRealML };
 async function sincronizarPrecosReais(orcamento: OrcamentoResposta): Promise<OrcamentoResposta> {
   if (!orcamento?.itens || orcamento.itens.length === 0) return orcamento;
 
+  // Formata veiculo_detectado com antecedência para passar para as buscas de preços reais
+  if (!orcamento.veiculo_detectado && orcamento.veiculo) {
+    const { marca, modelo, motorizacao, ano } = orcamento.veiculo;
+    const partes = [marca, modelo, motorizacao, ano].filter(Boolean);
+    orcamento.veiculo_detectado = partes.length > 0 ? partes.join(" ") : "Veículo Detectado";
+  }
+
+  const veiculoNome = orcamento.veiculo_detectado || (orcamento.veiculo?.modelo ?? "");
+
   await Promise.all(
     orcamento.itens.map(async (item) => {
       // Normalização de campos de compatibilidade
@@ -132,12 +143,17 @@ async function sincronizarPrecosReais(orcamento: OrcamentoResposta): Promise<Orc
 
       const termoBusca =
         item.termo_busca_mercadolivre || item.query_busca || item.peca_padronizada;
-      const oferta = await buscarPrecoMercadoLivre(termoBusca);
+      const oferta = await buscarPrecoMercadoLivre(termoBusca, veiculoNome);
 
       if (oferta) {
+        // Campos explícitos obrigatórios do formato de retorno
         item.preco = oferta.preco;
-        item.preco_real_ml = oferta.preco;
         item.preco_formatado = oferta.preco_formatado;
+        item.link = oferta.link;
+        item.marca = oferta.marca;
+
+        // Campos complementares e legados para compatibilidade total
+        item.preco_real_ml = oferta.preco;
         item.preco_medio = oferta.preco_formatado;
         item.preco_medio_estimado = oferta.preco_formatado;
         item.titulo_anuncio = oferta.titulo;
@@ -150,13 +166,6 @@ async function sincronizarPrecosReais(orcamento: OrcamentoResposta): Promise<Orc
       }
     })
   );
-
-  // Formata veiculo_detectado para facilitar a exibição
-  if (!orcamento.veiculo_detectado && orcamento.veiculo) {
-    const { marca, modelo, motorizacao, ano } = orcamento.veiculo;
-    const partes = [marca, modelo, motorizacao, ano].filter(Boolean);
-    orcamento.veiculo_detectado = partes.length > 0 ? partes.join(" ") : "Veículo Detectado";
-  }
 
   // Recalcula o total_estimado somando estritamente os PREÇOS REAIS encontrados
   let totalNum = 0;
@@ -469,17 +478,10 @@ export async function POST(request: NextRequest) {
       },
     };
 
-    // Modelos suportados na API v1beta (gemini-flash-latest e variantes ativas)
+    // Modelos suportados na API v1beta (gemini-flash-latest ativo)
     const modelsToTry = [
       process.env.GEMINI_MODEL,
       "gemini-flash-latest",
-      "gemini-2.5-flash",
-      "gemini-2.0-flash",
-      "gemini-1.5-flash",
-      "gemini-3.5-flash",
-      "gemini-3.5-flash-lite",
-      "gemini-3.1-flash-lite",
-      "gemini-3.8-flash",
     ].filter(Boolean) as string[];
 
     let rawContent: string | null = null;

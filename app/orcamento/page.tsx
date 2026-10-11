@@ -42,6 +42,8 @@ interface ItemOrcamento {
   preco?: number | null;
   preco_real_ml?: number | null;
   preco_formatado?: string | null;
+  link?: string | null;
+  marca?: string | null;
   titulo_anuncio?: string | null;
   link_anuncio?: string | null;
   tem_full?: boolean;
@@ -768,10 +770,12 @@ Peças:
                         item.nome_peca ||
                         "";
                       const directUrl =
+                        item.link ||
                         item.link_anuncio ||
                         item.link_direto_anuncio ||
                         `/api/redirect?query=${encodeURIComponent(termoBusca)}`;
                       const marcaNome =
+                        item.marca ||
                         item.marca_preferencial ||
                         item.marca_recomendada ||
                         "Original / Homologada";
@@ -1031,6 +1035,7 @@ Peças:
                     item.nome_peca ||
                     "";
                   const directLink =
+                    item.link ||
                     item.link_anuncio ||
                     item.link_direto_anuncio ||
                     `/api/redirect?query=${encodeURIComponent(termoBusca)}`;
@@ -1104,7 +1109,7 @@ Peças:
                             <span>
                               Marca:{" "}
                               <strong className="text-zinc-700 dark:text-zinc-300 font-medium">
-                                {item.marca_preferencial || item.marca_recomendada || "Homologada"}
+                                {item.marca || item.marca_preferencial || item.marca_recomendada || "Homologada"}
                               </strong>
                             </span>
                           </div>
