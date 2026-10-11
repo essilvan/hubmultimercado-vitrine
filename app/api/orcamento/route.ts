@@ -27,6 +27,7 @@ export interface ItemOrcamento {
   preco_real_ml?: number | null;
   preco_formatado?: string | null;
   link?: string | null;
+  link_ml?: string | null;
   marca?: string | null;
   titulo_anuncio?: string | null;
   link_anuncio?: string | null;
@@ -182,6 +183,11 @@ async function sincronizarPrecosReais(orcamento: OrcamentoResposta): Promise<Orc
         }
       }
 
+      const urlCanonicaML =
+        oferta?.link_ml ||
+        oferta?.link ||
+        `https://lista.mercadolivre.com.br/${encodeURIComponent(queryObrigatoria)}`;
+
       if (oferta && typeof oferta.preco === "number" && oferta.preco > 0) {
         const precoNum = Number(oferta.preco);
         const precoFormatado = new Intl.NumberFormat("pt-BR", {
@@ -192,6 +198,7 @@ async function sincronizarPrecosReais(orcamento: OrcamentoResposta): Promise<Orc
         item.preco = precoNum;
         item.preco_formatado = precoFormatado;
         item.link = oferta.link;
+        item.link_ml = urlCanonicaML;
         item.marca = oferta.marca;
 
         // Campos complementares e legados para compatibilidade total
@@ -200,11 +207,16 @@ async function sincronizarPrecosReais(orcamento: OrcamentoResposta): Promise<Orc
         item.preco_medio_estimado = precoFormatado;
         item.titulo_anuncio = oferta.titulo;
         item.link_anuncio = oferta.link;
-        item.link_direto_anuncio = oferta.link;
+        item.link_direto_anuncio = urlCanonicaML;
         item.tem_full = oferta.tem_full;
         item.thumbnail = oferta.thumbnail;
         item.preco_original = oferta.original_price ? Number(oferta.original_price) : null;
         item.preco_real = true;
+      } else {
+        item.link_ml = urlCanonicaML;
+        item.link = urlCanonicaML;
+        item.link_anuncio = urlCanonicaML;
+        item.link_direto_anuncio = urlCanonicaML;
       }
     })
   );

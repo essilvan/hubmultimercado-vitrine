@@ -1324,6 +1324,7 @@ export interface OfertaRealML {
   preco: number;
   preco_formatado: string;
   link: string;
+  link_ml?: string;
   marca: string;
   titulo: string;
   tem_full: boolean;
@@ -1435,6 +1436,7 @@ export async function buscarPrecoMercadoLivre(
               preco: precoNumerico,
               preco_formatado: precoFormatado,
               link: linkAfiliado,
+              link_ml: permalink,
               marca: marcaItem,
               titulo: item.title || queryLimpa,
               tem_full: temFull,
@@ -1459,10 +1461,12 @@ export async function buscarPrecoMercadoLivre(
 
       if (precoNumerico > 0) {
         console.log(`[Supabase Fallback] Query: ${queryLimpa} -> Encontrado: ${prodSupa.titulo} (${prodSupa.preco_estimado})`);
+        const mlLinkSupa = prodSupa.link_afiliado || `https://lista.mercadolivre.com.br/${encodeURIComponent(prodSupa.titulo)}`;
         return {
           preco: precoNumerico,
           preco_formatado: formatarPrecoBRL(precoNumerico),
           link: prodSupa.link_afiliado || (prodSupa.slug ? `/pecas/${prodSupa.slug}` : `/api/redirect?query=${encodeURIComponent(prodSupa.titulo)}`),
+          link_ml: mlLinkSupa,
           marca: prodSupa.marca && prodSupa.marca !== "Auto Peças" ? prodSupa.marca : (deduzirMarca(prodSupa.titulo) || "Original / Homologada"),
           titulo: prodSupa.titulo,
           tem_full: true,
@@ -1533,6 +1537,7 @@ export async function buscarPrecoMercadoLivre(
                 preco: precoNumerico,
                 preco_formatado: formatarPrecoBRL(precoNumerico),
                 link: linkAfiliado,
+                link_ml: cleanLink,
                 marca: deduzirMarca(matchTituloFinal?.[1]) || "Original / Homologada",
                 titulo: matchTituloFinal ? matchTituloFinal[1].trim() : queryLimpa,
                 tem_full:
@@ -1553,10 +1558,12 @@ export async function buscarPrecoMercadoLivre(
   // 5. Fallback Seguro de Referência Aftermarket (garante que NUNCA fique null ou "Sob Consulta")
   const ref = deduzirPrecoReferenciaMercado(queryLimpa, veiculoDetectado);
   console.log(`[Referencia Aftermarket] Query: ${queryLimpa} -> R$ ${ref.preco}`);
+  const urlBuscaML = `https://lista.mercadolivre.com.br/${encodeURIComponent(queryLimpa)}`;
   return {
     preco: ref.preco,
     preco_formatado: formatarPrecoBRL(ref.preco),
-    link: `/api/redirect?query=${encodeURIComponent(queryLimpa)}`,
+    link: urlBuscaML,
+    link_ml: urlBuscaML,
     marca: ref.marca,
     titulo: ref.titulo,
     tem_full: true,

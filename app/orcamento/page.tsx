@@ -45,6 +45,7 @@ interface ItemOrcamento {
   preco_real_ml?: number | null;
   preco_formatado?: string | null;
   link?: string | null;
+  link_ml?: string | null;
   marca?: string | null;
   titulo_anuncio?: string | null;
   link_anuncio?: string | null;
@@ -133,7 +134,14 @@ function gerarTextoClienteFinal(
         ? `${qtd}x de ${precoUnitTxt} = ${formatarMoeda(subtotal)}`
         : precoUnitTxt;
 
-      let link = item.link || item.link_anuncio || item.link_direto_anuncio || "";
+      let link =
+        item.link_ml ||
+        item.link ||
+        item.link_anuncio ||
+        item.link_direto_anuncio ||
+        `https://lista.mercadolivre.com.br/${encodeURIComponent(
+          item.termo_busca_mercadolivre || nome
+        )}`;
       if (link && link.startsWith("/")) {
         link = `https://hubmultimercado-vitrine.vercel.app${link}`;
       }
@@ -268,7 +276,10 @@ export default function OrcamentoPage() {
   const [aviso, setAviso] = useState<string | null>(null);
   const [erro, setErro] = useState<string | null>(null);
   const [avisoPopup, setAvisoPopup] = useState(false);
-  const [modalFechamentoAberto, setModalFechamentoAberto] = useState(false);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const modalFechamentoAberto = isModalOpen;
+  const setModalFechamentoAberto = setIsModalOpen;
+  const [avisoPopupsBloqueados, setAvisoPopupsBloqueados] = useState(false);
   const [copiadoCliente, setCopiadoCliente] = useState(false);
   const [copiadoFornecedor, setCopiadoFornecedor] = useState(false);
 
@@ -444,49 +455,62 @@ export default function OrcamentoPage() {
     }
   };
 
-  // Abre a pesquisa de kit completo consolidado em uma única aba (nunca bloqueado por pop-up)
+  // BOTÃO 3: "VER KIT COMPLETO NO MERCADO LIVRE"
+  // Ao clicar, abre diretamente em nova aba a busca unificada com os termos principais
   const handleVerKitCompleto = () => {
-    if (!resultado) return;
-    const queryKit = gerarQueryKitCompleto(resultado);
-    const url = `/api/redirect?query=${encodeURIComponent(queryKit)}`;
-    window.open(url, "_blank");
+    if (!resultado?.itens || resultado.itens.length === 0) return;
+    const veiculo = resultado.veiculo || { modelo: resultado.veiculo_detectado || "" };
+    const itensEscolhidos = resultado.itens.filter((_, idx) =>
+      itensSelecionados.length > 0 ? itensSelecionados.includes(idx) : true
+    );
+    const termoKit = `${veiculo.modelo || ""} kit ${itensEscolhidos
+      .map((i) => i.peca_padronizada || i.nome_peca)
+      .join(" ")}`.replace(/\s+/g, " ").trim();
+    const urlKit = `https://lista.mercadolivre.com.br/${encodeURIComponent(termoKit)}`;
+    window.open(urlKit, "_blank");
   };
 
-  // Abre todas as peças individuais com proteção e detecção de bloqueio de pop-ups
-  const handleClick = () => {
+  // BOTÃO 4: "ABRIR TODAS EM ABAS SEPARADAS"
+  // Para evitar o bloqueio de pop-ups dos navegadores com intervalo sutil
+  const handleAbrirTodas = () => {
     if (!resultado?.itens || resultado.itens.length === 0) return;
 
-    let bloqueado = false;
-    let abertas = 0;
+    const itensParaAbrir = resultado.itens.filter((_, idx) =>
+      itensSelecionados.length > 0 ? itensSelecionados.includes(idx) : true
+    );
 
-    resultado.itens.forEach((item) => {
-      const termo =
-        item.termo_busca_mercadolivre ||
-        item.query_busca ||
-        item.peca_padronizada ||
-        item.nome_peca ||
-        "";
-      const url = `/api/redirect?query=${encodeURIComponent(termo)}`;
+    itensParaAbrir.forEach((item, index) => {
+      const urlFinal =
+        item.link_ml ||
+        item.link ||
+        item.link_anuncio ||
+        item.link_direto_anuncio ||
+        `https://lista.mercadolivre.com.br/${encodeURIComponent(
+          item.termo_busca_mercadolivre || item.peca_padronizada || item.nome_peca || ""
+        )}`;
 
-      try {
-        const novaAba = window.open(url, "_blank");
-        if (!novaAba || novaAba.closed || typeof novaAba.closed === "undefined") {
-          bloqueado = true;
-        } else {
-          abertas++;
-        }
-      } catch {
-        bloqueado = true;
+      if (urlFinal) {
+        setTimeout(() => {
+          try {
+            const novaAba = window.open(urlFinal, "_blank", "noopener,noreferrer");
+            if (!novaAba || novaAba.closed || typeof novaAba.closed === "undefined") {
+              setAvisoPopupsBloqueados(true);
+            }
+          } catch {
+            setAvisoPopupsBloqueados(true);
+          }
+        }, index * 250); // intervalo sutil de 250ms para evitar bloqueio agressivo de pop-up
       }
     });
 
-    // Se o navegador bloqueou após a primeira aba ou impediu a abertura
-    if (bloqueado || (resultado.itens.length > 1 && abertas < resultado.itens.length)) {
-      setAvisoPopup(true);
+    if (itensParaAbrir.length > 1) {
+      setTimeout(() => {
+        setAvisoPopupsBloqueados(true);
+      }, itensParaAbrir.length * 250 + 100);
     }
   };
 
-  const handleAbrirTodas = handleClick;
+  const handleClick = handleAbrirTodas;
 
   return (
     <div className="min-h-screen bg-zinc-50 dark:bg-zinc-950 text-zinc-900 dark:text-zinc-100 flex flex-col">
@@ -792,7 +816,7 @@ Peças:
 
                 <button
                   type="button"
-                  onClick={() => setModalFechamentoAberto(true)}
+                  onClick={() => setIsModalOpen(true)}
                   className="mt-4 px-4 py-2.5 rounded-xl bg-gradient-to-r from-emerald-500 to-emerald-400 hover:from-emerald-400 hover:to-emerald-300 text-zinc-950 font-black text-xs transition shadow-lg hover:shadow-emerald-500/25 flex items-center justify-center gap-2 cursor-pointer transform active:scale-95"
                   title="Abrir checklist de fechamento de orçamento"
                 >
@@ -818,7 +842,7 @@ Peças:
                 <div className="flex flex-wrap items-center gap-2.5 self-start sm:self-auto">
                   <button
                     type="button"
-                    onClick={() => setModalFechamentoAberto(true)}
+                    onClick={() => setIsModalOpen(true)}
                     className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-zinc-950 text-xs font-black transition shadow-md hover:shadow-lg cursor-pointer transform active:scale-95"
                     title="Abrir checklist de fechamento de orçamento com opções de WhatsApp"
                   >
@@ -838,7 +862,7 @@ Peças:
 
                   <button
                     type="button"
-                    onClick={handleClick}
+                    onClick={handleAbrirTodas}
                     className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-zinc-900 dark:bg-white text-white dark:text-zinc-900 text-xs font-bold hover:opacity-90 transition shadow-sm cursor-pointer"
                     title="Abre as peças individualmente em abas do navegador"
                   >
@@ -878,10 +902,11 @@ Peças:
                         item.nome_peca ||
                         "";
                       const directUrl =
+                        item.link_ml ||
                         item.link ||
                         item.link_anuncio ||
                         item.link_direto_anuncio ||
-                        `/api/redirect?query=${encodeURIComponent(termoBusca)}`;
+                        `https://lista.mercadolivre.com.br/${encodeURIComponent(termoBusca)}`;
                       const marcaNome =
                         item.marca ||
                         item.marca_preferencial ||
@@ -1002,14 +1027,13 @@ Peças:
                           {/* 6. Botão sutil "Ver Oferta" */}
                           <td className="py-3.5 px-4 align-middle text-center">
                             <a
-                              href={directUrl}
+                              href={item.link_ml || (termoBusca ? `https://lista.mercadolivre.com.br/${encodeURIComponent(termoBusca)}` : directUrl)}
                               target="_blank"
                               rel="noopener noreferrer"
-                              className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-xl bg-zinc-100 hover:bg-emerald-500 hover:text-zinc-950 dark:bg-zinc-800 dark:hover:bg-emerald-400 dark:hover:text-zinc-950 text-zinc-700 dark:text-zinc-300 text-xs font-semibold transition cursor-pointer border border-zinc-200 dark:border-zinc-700 group"
-                              title={`Ver oferta de "${item.peca_padronizada || item.nome_peca}"`}
+                              className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-xl bg-zinc-100 hover:bg-emerald-500 hover:text-zinc-950 dark:bg-zinc-800 dark:hover:bg-emerald-400 dark:hover:text-zinc-950 text-zinc-700 dark:text-zinc-300 text-xs font-bold transition cursor-pointer border border-zinc-200 dark:border-zinc-700 group"
+                              title={`Ver oferta de "${item.peca_padronizada || item.nome_peca}" no Mercado Livre`}
                             >
-                              <span>Ver Oferta</span>
-                              <ExternalLink className="w-3 h-3 group-hover:translate-x-0.5 transition-transform" />
+                              <span>Ver Oferta ↗</span>
                             </a>
                           </td>
                         </tr>
@@ -1058,6 +1082,16 @@ Peças:
                   <div className="flex flex-wrap items-center gap-2.5">
                     <button
                       type="button"
+                      onClick={() => setIsModalOpen(true)}
+                      className="px-3.5 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-zinc-950 text-xs font-black transition shadow-xs cursor-pointer flex items-center gap-1.5 transform active:scale-95"
+                      title="Abrir checklist de fechamento de orçamento"
+                    >
+                      <ShoppingBag className="w-4 h-4" />
+                      <span>Fechar Orçamento ({resultado.itens.length})</span>
+                    </button>
+
+                    <button
+                      type="button"
                       onClick={handleVerKitCompleto}
                       className="px-3.5 py-2 rounded-xl bg-amber-400 hover:bg-amber-300 text-zinc-950 text-xs font-bold transition shadow-xs cursor-pointer flex items-center gap-1.5 transform active:scale-95"
                       title="Pesquisar todas as peças agrupadas em um kit completo no Mercado Livre"
@@ -1068,12 +1102,23 @@ Peças:
 
                     <button
                       type="button"
+                      onClick={handleAbrirTodas}
+                      className="px-3.5 py-2 rounded-xl bg-zinc-900 dark:bg-white text-white dark:text-zinc-900 text-xs font-bold hover:opacity-90 transition shadow-xs cursor-pointer flex items-center gap-1.5"
+                      title="Abre as peças individualmente em abas do navegador"
+                    >
+                      <ExternalLink className="w-3.5 h-3.5" />
+                      <span>Abrir todas</span>
+                    </button>
+
+                    <button
+                      type="button"
                       onClick={() => {
                         setResultado(null);
                         setTexto("");
                         handleClearImage();
                         setAvisoPopup(false);
-                        setModalFechamentoAberto(false);
+                        setIsModalOpen(false);
+                        setAvisoPopupsBloqueados(false);
                       }}
                       className="px-3.5 py-2 rounded-xl text-xs font-semibold text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200 dark:hover:bg-zinc-800 transition cursor-pointer"
                     >
@@ -1081,6 +1126,26 @@ Peças:
                     </button>
                   </div>
                 </div>
+
+                {/* Aviso simples e direto caso o navegador bloqueie pop-ups */}
+                {avisoPopupsBloqueados && (
+                  <div className="p-3.5 rounded-2xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 text-xs text-amber-900 dark:text-amber-200 flex items-center justify-between gap-3 animate-in fade-in duration-200">
+                    <div className="flex items-center gap-2.5">
+                      <AlertCircle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
+                      <span>
+                        Se apenas uma aba abriu, permita pop-ups neste site para abrir todas as peças de uma vez.
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setAvisoPopupsBloqueados(false)}
+                      className="p-1 rounded-lg text-amber-700 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/50 transition cursor-pointer shrink-0"
+                      title="Fechar aviso"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                )}
 
                 {/* Bloco de Compartilhamento Lado a Lado: Cliente Final vs Fornecedores (B2B) */}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2 border-t border-zinc-200 dark:border-zinc-800">
@@ -1198,7 +1263,7 @@ Peças:
         {/* =========================================================================
             MODAL INTERATIVO: FECHAR ORÇAMENTO COMPLETO
         ========================================================================== */}
-        {modalFechamentoAberto && resultado && (
+        {isModalOpen && resultado && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-zinc-950/75 backdrop-blur-sm animate-in fade-in duration-200">
             <div className="bg-white dark:bg-zinc-900 border-2 border-zinc-200 dark:border-zinc-800 rounded-3xl max-w-3xl w-full shadow-2xl flex flex-col max-h-[90vh] overflow-hidden">
               {/* Header do Modal */}
@@ -1232,7 +1297,7 @@ Peças:
 
                 <button
                   type="button"
-                  onClick={() => setModalFechamentoAberto(false)}
+                  onClick={() => setIsModalOpen(false)}
                   className="p-2 rounded-xl text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition cursor-pointer"
                   title="Fechar modal"
                 >
@@ -1241,7 +1306,7 @@ Peças:
               </div>
 
               {/* Barra de Seleção / Contagem */}
-              <div className="px-6 py-3 bg-zinc-100/70 dark:bg-zinc-950/70 border-b border-zinc-200 dark:border-zinc-800 flex items-center justify-between text-xs">
+              <div className="px-6 py-3 bg-zinc-100/70 dark:bg-zinc-950/70 border-b border-zinc-200 dark:border-zinc-800 flex flex-wrap items-center justify-between gap-3 text-xs">
                 <button
                   type="button"
                   onClick={handleToggleTodos}
@@ -1259,10 +1324,32 @@ Peças:
                   </span>
                 </button>
 
-                <span className="font-semibold text-zinc-500 dark:text-zinc-400">
-                  <strong className="text-zinc-900 dark:text-white font-mono">{itensSelecionados.length}</strong> de{" "}
-                  <strong className="font-mono">{resultado.itens.length}</strong> peças selecionadas
-                </span>
+                <div className="flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={handleVerKitCompleto}
+                    className="font-bold text-amber-600 dark:text-amber-400 hover:underline flex items-center gap-1 cursor-pointer"
+                    title="Ver kit unificado no Mercado Livre"
+                  >
+                    <Package className="w-3.5 h-3.5" />
+                    <span>Kit Completo</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleAbrirTodas}
+                    className="font-bold text-zinc-600 dark:text-zinc-400 hover:underline flex items-center gap-1 cursor-pointer"
+                    title="Abrir abas de todas as peças"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    <span>Abrir todas</span>
+                  </button>
+
+                  <span className="font-semibold text-zinc-500 dark:text-zinc-400">
+                    <strong className="text-zinc-900 dark:text-white font-mono">{itensSelecionados.length}</strong> de{" "}
+                    <strong className="font-mono">{resultado.itens.length}</strong> selecionadas
+                  </span>
+                </div>
               </div>
 
               {/* Lista Scrollável de Itens com Checkbox, Foto, Título Real e Preço Real */}
@@ -1276,10 +1363,11 @@ Peças:
                     item.nome_peca ||
                     "";
                   const directLink =
+                    item.link_ml ||
                     item.link ||
                     item.link_anuncio ||
                     item.link_direto_anuncio ||
-                    `/api/redirect?query=${encodeURIComponent(termoBusca)}`;
+                    `https://lista.mercadolivre.com.br/${encodeURIComponent(termoBusca)}`;
 
                   return (
                     <div
@@ -1383,14 +1471,13 @@ Peças:
                         </div>
 
                         <a
-                          href={directLink}
+                          href={item.link_ml || (termoBusca ? `https://lista.mercadolivre.com.br/${encodeURIComponent(termoBusca)}` : directLink)}
                           target="_blank"
                           rel="noopener noreferrer"
                           className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-zinc-100 dark:bg-zinc-800 hover:bg-emerald-500 hover:text-zinc-950 text-zinc-700 dark:text-zinc-300 text-xs font-bold transition shadow-xs cursor-pointer group"
                           title="Abrir este produto diretamente no Mercado Livre"
                         >
-                          <span>Ver no ML</span>
-                          <ExternalLink className="w-3 h-3 group-hover:translate-x-0.5 transition-transform" />
+                          <span>Ver Oferta ↗</span>
                         </a>
                       </div>
                     </div>
