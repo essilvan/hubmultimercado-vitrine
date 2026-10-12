@@ -32,10 +32,13 @@ import {
 } from "lucide-react";
 
 interface ItemOrcamento {
-  termo_lido?: string;
   peca_padronizada: string;
   quantidade?: number;
   posicao?: string | null;
+  marcas_recomendadas?: string;
+  termo_busca_ml?: string;
+
+  termo_lido?: string;
   marca_preferencial?: string | null;
   termo_busca_mercadolivre?: string;
   confianca?: "alta" | "media" | "baixa";
@@ -896,6 +899,7 @@ Peças:
                     {resultado.itens.map((item, idx) => {
                       const isChecked = itensSelecionados.includes(idx);
                       const termoBusca =
+                        item.termo_busca_ml ||
                         item.termo_busca_mercadolivre ||
                         item.query_busca ||
                         item.peca_padronizada ||
@@ -909,6 +913,7 @@ Peças:
                         `https://lista.mercadolivre.com.br/${encodeURIComponent(termoBusca)}`;
                       const marcaNome =
                         item.marca ||
+                        item.marcas_recomendadas ||
                         item.marca_preferencial ||
                         item.marca_recomendada ||
                         "Original / Homologada";

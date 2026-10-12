@@ -1144,18 +1144,7 @@ async function buscarNoSupabaseCompativel(termoBusca: string, veiculo?: string |
       }
     }
 
-    // 3. Fallback no catálogo: Qualquer produto do mesmo tipo de peça automotiva no banco
-    if (pecaPrincipal) {
-      const { data: itensCat } = await supabase
-        .from("produtos_afiliados")
-        .select("id, titulo, preco_estimado, marca, link_afiliado, imagem_url, veiculos_compativeis, slug")
-        .ilike("titulo", `%${pecaPrincipal}%`)
-        .limit(1);
-
-      if (itensCat && itensCat.length > 0) {
-        return itensCat[0];
-      }
-    }
+    // Removido fallback genérico irrestrito para evitar compatibilidade cruzada incorreta entre modelos diferentes
   } catch (err: any) {
     console.error("[Supabase Fallback Error]", err?.message || err);
   }
@@ -1280,48 +1269,158 @@ export const MODELOS_COMPATIVEIS_MAP: Record<string, string[]> = {
   "c4": ["c4", "c4 pallas", "c4 cactus", "307", "308"],
 };
 
+export interface ValidacaoTituloResultado {
+  valido: boolean;
+  motivo?: string;
+}
+
+const MONTADORAS_CONCORRENTES = [
+  "chevrolet", "gm", "volkswagen", "vw", "fiat", "ford", "toyota", "honda",
+  "hyundai", "renault", "nissan", "jeep", "peugeot", "citroen", "citroën",
+  "mitsubishi", "kia", "chery", "caoa chery", "bmw", "audi", "mercedes"
+];
+
 /**
- * Filtro de compatibilidade: se o título do anúncio do Mercado Livre contiver
- * palavras de modelos concorrentes/incompatíveis com o veículo solicitado,
- * retorna false para descartar esse anúncio e pegar o próximo.
+ * Validação rigorosa do título do produto contra o veículo solicitado e o tipo de item:
+ * 1. Valida modelo e montadora (rejeita Peugeot, Citroen, 308, Gol, Onix se o carro for HB20, etc.)
+ * 2. Rejeita peças secundárias/acessórias (Mangueira, Tubo, Suporte) se o item for a peça principal
+ * 3. Rejeita kits completos quando o usuário solicitou peças unitárias
  */
-export function isTituloCompativel(tituloAnuncio?: string | null, veiculoAlvo?: string | null): boolean {
-  if (!tituloAnuncio || !veiculoAlvo) return true;
+export function validarTituloML(
+  tituloAnuncio?: string | null,
+  veiculoAlvo?: { marca?: string | null; modelo?: string | null; ano?: string | null } | string | null,
+  pecaPadronizada?: string | null,
+  termoBusca?: string | null
+): ValidacaoTituloResultado {
+  if (!tituloAnuncio || !tituloAnuncio.trim()) {
+    return { valido: false, motivo: "Título vazio" };
+  }
+  const t = tituloAnuncio.toLowerCase();
 
-  const tAnuncio = tituloAnuncio.toLowerCase();
-  const tVeiculo = veiculoAlvo.toLowerCase();
+  // 1. Validação de Veículo e Montadora
+  const veicStr = typeof veiculoAlvo === "string"
+    ? veiculoAlvo
+    : `${veiculoAlvo?.marca || ""} ${veiculoAlvo?.modelo || ""}`.trim();
+  const v = veicStr.toLowerCase();
 
-  // Encontra qual modelo principal corresponde ao veículo do usuário
+  // Detecta modelo alvo no veículo de entrada
   let modeloDetectado: string | null = null;
   for (const mod of Object.keys(MODELOS_COMPATIVEIS_MAP)) {
-    const reg = new RegExp(`\\b${mod}\\b`, "i");
-    if (reg.test(tVeiculo)) {
+    if (new RegExp(`\\b${mod}\\b`, "i").test(v)) {
       modeloDetectado = mod;
       break;
     }
   }
 
-  // Se nenhum modelo específico foi detectado no veículo de referência, considera compatível
-  if (!modeloDetectado) return true;
+  // Detecta montadora alvo
+  let montadoraDetectada: string | null = null;
+  for (const m of MONTADORAS_CONCORRENTES) {
+    if (new RegExp(`\\b${m}\\b`, "i").test(v)) {
+      montadoraDetectada = m;
+      break;
+    }
+  }
+  if (!montadoraDetectada && modeloDetectado) {
+    if (["hb20", "creta", "tucson", "ix35", "i30"].includes(modeloDetectado)) montadoraDetectada = "hyundai";
+    else if (["gol", "fox", "voyage", "saveiro", "polo", "golf", "up", "virtus", "nivus", "t-cross"].includes(modeloDetectado)) montadoraDetectada = "volkswagen";
+    else if (["onix", "prisma", "celta", "corsa", "cobalt", "spin", "cruze", "tracker", "s10", "montana", "astra", "vectra"].includes(modeloDetectado)) montadoraDetectada = "chevrolet";
+    else if (["palio", "uno", "siena", "strada", "toro", "mobi", "argo", "cronos", "pulse", "fastback"].includes(modeloDetectado)) montadoraDetectada = "fiat";
+    else if (["ka", "fiesta", "ecosport", "focus", "ranger"].includes(modeloDetectado)) montadoraDetectada = "ford";
+    else if (["civic", "fit", "city", "hr-v"].includes(modeloDetectado)) montadoraDetectada = "honda";
+    else if (["corolla", "etios", "yaris", "hilux"].includes(modeloDetectado)) montadoraDetectada = "toyota";
+    else if (["kwid", "sandero", "logan", "duster", "clio"].includes(modeloDetectado)) montadoraDetectada = "renault";
+    else if (["kicks", "march", "versa"].includes(modeloDetectado)) montadoraDetectada = "nissan";
+    else if (["206", "207", "208", "307", "308", "2008", "3008"].includes(modeloDetectado)) montadoraDetectada = "peugeot";
+    else if (["c3", "c4", "aircross"].includes(modeloDetectado)) montadoraDetectada = "citroen";
+  }
 
-  const compativeis = new Set(MODELOS_COMPATIVEIS_MAP[modeloDetectado] || [modeloDetectado]);
-
-  // Checa se o título do anúncio contém algum modelo concorrente não compatível
-  for (const outroModelo of Object.keys(MODELOS_COMPATIVEIS_MAP)) {
-    if (compativeis.has(outroModelo)) continue;
-
-    const reg = new RegExp(`\\b${outroModelo}\\b`, "i");
-    if (reg.test(tAnuncio)) {
-      // O anúncio cita explicitamente um modelo concorrente/incompatível
-      return false;
+  // Rejeita marcas concorrentes (se o carro for HB20/Hyundai, rejeita Peugeot, Citroën, VW, etc.)
+  if (montadoraDetectada) {
+    for (const m of MONTADORAS_CONCORRENTES) {
+      if (
+        m !== montadoraDetectada &&
+        !(montadoraDetectada === "volkswagen" && m === "vw") &&
+        !(montadoraDetectada === "chevrolet" && m === "gm") &&
+        !(montadoraDetectada === "citroen" && m === "citroën")
+      ) {
+        if (new RegExp(`\\b${m}\\b`, "i").test(t)) {
+          return { valido: false, motivo: `Marca concorrente detectada: ${m}` };
+        }
+      }
     }
   }
 
-  return true;
+  // Rejeita modelos concorrentes (se o carro for HB20, rejeita 308, Gol, Onix, etc.)
+  if (modeloDetectado) {
+    const compativeis = new Set(MODELOS_COMPATIVEIS_MAP[modeloDetectado] || [modeloDetectado]);
+    for (const outroMod of Object.keys(MODELOS_COMPATIVEIS_MAP)) {
+      if (!compativeis.has(outroMod)) {
+        if (new RegExp(`\\b${outroMod}\\b`, "i").test(t)) {
+          return { valido: false, motivo: `Modelo concorrente detectado: ${outroMod}` };
+        }
+      }
+    }
+  }
+
+  // 2. Validação de Peça Unitária vs Peças Acessórias / Mangueiras / Tubos / Suportes
+  const pecaStr = `${pecaPadronizada || ""} ${termoBusca || ""}`.toLowerCase();
+  const palavrasAcessorios = [
+    "mangueira", "tubo", "suporte", "bucha", "tampa", "flange",
+    "cano", "chave", "capa", "abracadeira", "abraçadeira", "presilha"
+  ];
+
+  for (const palavra of palavrasAcessorios) {
+    if (!pecaStr.includes(palavra) && new RegExp(`\\b${palavra}\\b`, "i").test(t)) {
+      return { valido: false, motivo: `Item secundário/acessório detectado (${palavra}) quando solicitado item principal` };
+    }
+  }
+
+  // 3. Validação de Peça Unitária vs Kits Completos
+  const isKitSolicitado = /\bkit\b/i.test(pecaStr);
+  if (!isKitSolicitado) {
+    // Rejeita anúncios de Kit quando a peça é unitária
+    if (/\bkit\b/i.test(t)) {
+      return { valido: false, motivo: "Anúncio de Kit completo para item individual" };
+    }
+    if (pecaStr.includes("pastilha") && !pecaStr.includes("disco") && /\bdisco\b/i.test(t)) {
+      return { valido: false, motivo: "Anúncio de Kit com Disco quando solicitado apenas Pastilha" };
+    }
+    if (pecaStr.includes("disco") && !pecaStr.includes("pastilha") && /\bpastilha\b/i.test(t)) {
+      return { valido: false, motivo: "Anúncio de Kit com Pastilha quando solicitado apenas Disco" };
+    }
+  }
+
+  return { valido: true };
+}
+
+/**
+ * Filtro de compatibilidade compatível com a assinatura anterior
+ */
+export function isTituloCompativel(
+  tituloAnuncio?: string | null,
+  veiculoAlvo?: { marca?: string | null; modelo?: string | null } | string | null,
+  pecaPadronizada?: string | null,
+  termoBusca?: string | null
+): boolean {
+  return validarTituloML(tituloAnuncio, veiculoAlvo, pecaPadronizada, termoBusca).valido;
+}
+
+/**
+ * Constrói o link de contingência direto para a busca filtrada no Mercado Livre:
+ * https://lista.mercadolivre.com.br/{termo_busca_ml}_ItemCondition_2230284_OrderId_PRICE_ASC
+ */
+export function construirLinkContingenciaML(termoBusca: string): string {
+  const slug = (termoBusca || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-zA-Z0-9\s-]/g, " ")
+    .trim()
+    .replace(/\s+/g, "-");
+  return `https://lista.mercadolivre.com.br/${encodeURIComponent(slug)}_ItemCondition_2230284_OrderId_PRICE_ASC`;
 }
 
 export interface OfertaRealML {
-  preco: number;
+  preco: number | null;
   preco_formatado: string;
   link: string;
   link_ml?: string;
@@ -1333,32 +1432,36 @@ export interface OfertaRealML {
 }
 
 /**
- * Consulta o preço real e atualizado diretamente da API do Mercado Livre,
- * com fallback inteligente no Supabase produtos_afiliados e catálogo técnico
+ * Consulta o preço real e atualizado diretamente do Mercado Livre com validação técnica estrita
  */
 export async function buscarPrecoMercadoLivre(
   termoBusca: string,
-  veiculoDetectado?: string | null
+  veiculoDetectado?: { marca?: string | null; modelo?: string | null; ano?: string | null; motorizacao?: string | null } | string | null,
+  pecaPadronizada?: string | null,
+  quantidade?: number | null
 ): Promise<OfertaRealML> {
   const queryLimpa = (termoBusca || "").trim();
+  const linkContingencia = construirLinkContingenciaML(queryLimpa);
+
   if (!queryLimpa) {
     return {
-      preco: 0,
-      preco_formatado: "R$ 0,00",
-      link: "#",
+      preco: null,
+      preco_formatado: "Sob Consulta",
+      link: linkContingencia,
+      link_ml: linkContingencia,
       marca: "Original / Homologada",
-      titulo: "Peça",
+      titulo: pecaPadronizada || "Peça",
       tem_full: false,
       thumbnail: null,
     };
   }
 
-  // 1. Obter Access Token (process.env.ML_ACCESS_TOKEN direto ou OAuth)
+  // 1. Obter Access Token se configurado
   const accessToken = await obterTokenMercadoLivre();
 
-  // 2. Requisição para a API oficial do Mercado Livre
+  // 2. Requisição para a API oficial do Mercado Livre (se acessível)
   try {
-    const apiUrl = `https://api.mercadolibre.com/sites/MLB/search?q=${encodeURIComponent(queryLimpa)}&limit=10`;
+    const apiUrl = `https://api.mercadolibre.com/sites/MLB/search?q=${encodeURIComponent(queryLimpa)}&limit=15`;
     const headers: Record<string, string> = {
       Accept: "application/json",
       "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -1373,45 +1476,17 @@ export async function buscarPrecoMercadoLivre(
       signal: AbortSignal.timeout(6000),
     });
 
-    console.log(`[ML Search] Query: ${queryLimpa}, Status: ${res.status}`);
-
-    if (!res.ok) {
-      const errText = await res.text().catch(() => "");
-      console.error("[ERRO ML API]", res.status, errText);
-    } else {
+    if (res.ok) {
       const data = await res.json();
       const results = data.results || [];
       if (results.length > 0) {
-        // Encontra o primeiro anúncio que tenha preço válido E seja compatível com o veículo
-        let item = results.find((it: any) => {
+        // Encontra o primeiro anúncio que passe na validação rigorosa de compatibilidade
+        const item = results.find((it: any) => {
           const preco = Number(it?.price) || Number(it?.original_price) || 0;
           if (preco <= 0 || !it?.title) return false;
-          return isTituloCompativel(it.title, veiculoDetectado);
+          return validarTituloML(it.title, veiculoDetectado, pecaPadronizada, queryLimpa).valido;
         });
 
-        // Se nenhum passou no filtro de compatibilidade, tenta busca mais restrita
-        if (!item && veiculoDetectado && results.length > 0) {
-          console.warn(`[ML Search] Anúncios incompatíveis para "${veiculoDetectado}". Tentando busca restrita...`);
-          const modeloPrimeiro = veiculoDetectado.split(" ")[0].trim();
-          const queryMaisRestrita = `"${modeloPrimeiro}" ${queryLimpa}`;
-          try {
-            const resRestrito = await fetch(
-              `https://api.mercadolibre.com/sites/MLB/search?q=${encodeURIComponent(queryMaisRestrita)}&limit=10`,
-              { headers, signal: AbortSignal.timeout(6000) }
-            );
-            if (resRestrito.ok) {
-              const dataRestrito = await resRestrito.json();
-              const resultsRestritos = dataRestrito.results || [];
-              item = resultsRestritos.find((it: any) => {
-                const preco = Number(it?.price) || Number(it?.original_price) || 0;
-                if (preco <= 0 || !it?.title) return false;
-                return isTituloCompativel(it.title, veiculoDetectado);
-              });
-            }
-          } catch {}
-        }
-
-        // Se encontrou item válido compatível
         if (item) {
           const precoNumerico = Number(item.price) || Number(item.original_price) || 0;
           if (precoNumerico > 0) {
@@ -1420,7 +1495,7 @@ export async function buscarPrecoMercadoLivre(
                 ? Number(item.original_price)
                 : null;
             const precoFormatado = formatarPrecoBRL(precoNumerico);
-            const permalink = item.permalink || `https://lista.mercadolivre.com.br/${encodeURIComponent(queryLimpa)}`;
+            const permalink = item.permalink || linkContingencia;
             const linkAfiliado = formatarLinkAfiliado(permalink);
             const thumbnail = obterImagemAltaResolucao(item.thumbnail);
             const marcaItem =
@@ -1448,125 +1523,108 @@ export async function buscarPrecoMercadoLivre(
       }
     }
   } catch (apiErr: any) {
-    console.error("[ERRO ML API]", apiErr?.message || apiErr);
+    // API oficial indisponível ou 403, segue para busca scraping
   }
 
-  // 3. Fallback de Segurança Inteligente: Supabase produtos_afiliados
+  // 3. Busca por Web Scraping com Googlebot User-Agent e ordenação por menor preço
   try {
-    const prodSupa = await buscarNoSupabaseCompativel(queryLimpa, veiculoDetectado);
-    if (prodSupa) {
-      const precoNumerico = parseFloat(
-        (prodSupa.preco_estimado || "").replace(/[^0-9,]/g, "").replace(",", ".")
-      ) || 0;
+    const slug = encodeURIComponent(
+      queryLimpa
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/[^a-zA-Z0-9\s-]/g, " ")
+        .trim()
+        .replace(/\s+/g, "-")
+    );
 
-      if (precoNumerico > 0) {
-        console.log(`[Supabase Fallback] Query: ${queryLimpa} -> Encontrado: ${prodSupa.titulo} (${prodSupa.preco_estimado})`);
-        const mlLinkSupa = prodSupa.link_afiliado || `https://lista.mercadolivre.com.br/${encodeURIComponent(prodSupa.titulo)}`;
-        return {
-          preco: precoNumerico,
-          preco_formatado: formatarPrecoBRL(precoNumerico),
-          link: prodSupa.link_afiliado || (prodSupa.slug ? `/pecas/${prodSupa.slug}` : `/api/redirect?query=${encodeURIComponent(prodSupa.titulo)}`),
-          link_ml: mlLinkSupa,
-          marca: prodSupa.marca && prodSupa.marca !== "Auto Peças" ? prodSupa.marca : (deduzirMarca(prodSupa.titulo) || "Original / Homologada"),
-          titulo: prodSupa.titulo,
-          tem_full: true,
-          thumbnail: prodSupa.imagem_url || null,
-        };
-      }
-    }
-  } catch (supaErr: any) {
-    console.error("[Supabase Fallback Error]", supaErr?.message || supaErr);
-  }
+    const urlsParaTentar = [
+      `https://lista.mercadolivre.com.br/${slug}_ItemCondition_2230284_OrderId_PRICE_ASC`,
+      `https://lista.mercadolivre.com.br/${slug}`,
+    ];
 
-  // 4. Fallback Web Scraping do Mercado Livre
-  try {
-    const cleanSlug = encodeURIComponent(queryLimpa).replace(/%20/g, "-");
-    const searchUrl = `https://lista.mercadolivre.com.br/${cleanSlug}`;
+    for (const searchUrl of urlsParaTentar) {
+      const res = await fetch(searchUrl, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "Accept-Language": "pt-BR,pt;q=0.9",
+        },
+        signal: AbortSignal.timeout(6000),
+      });
 
-    const res = await fetch(searchUrl, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
-        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "pt-BR,pt;q=0.9",
-      },
-      signal: AbortSignal.timeout(6000),
-    });
+      if (res.ok) {
+        const html = await res.text();
+        if (
+          !html.includes("suspicious-traffic") &&
+          (html.includes("andes-money-amount") || html.includes("poly-component"))
+        ) {
+          const cards = [...html.matchAll(/<li[^>]*class="[^"]*ui-search-layout__item[^"]*"[\s\S]*?<\/li>/gi)];
 
-    if (res.ok) {
-      const html = await res.text();
-      if (!html.includes("suspicious-traffic") && (html.includes("andes-money-amount") || html.includes("poly-component"))) {
-        const cards = [...html.matchAll(/<li[^>]*class="[^"]*ui-search-layout__item[^"]*"[\s\S]*?<\/li>/gi)];
-        
-        let targetChunk: string | null = null;
-        let matchTituloFinal: RegExpMatchArray | null = null;
+          for (const card of cards) {
+            const chunk = card[0];
+            const matchTitulo =
+              chunk.match(/class="[^"]*(?:poly-component__title|ui-search-item__title)[^"]*"[^>]*><a[^>]*>([^<]+)<\/a>/) ||
+              chunk.match(/class="[^"]*(?:poly-component__title|ui-search-item__title)[^"]*"[^>]*>([^<]+)</) ||
+              chunk.match(/<h2[^>]*class="[^"]*poly-box[^"]*"[^>]*><a[^>]*>([^<]+)<\/a>/);
+            const tituloCard = matchTitulo ? matchTitulo[1].trim() : "";
 
-        for (const card of cards) {
-          const chunk = card[0];
-          const matchTitulo =
-            chunk.match(/class="[^"]*(?:poly-component__title|ui-search-item__title)[^"]*"[^>]*><a[^>]*>([^<]+)<\/a>/) ||
-            chunk.match(/class="[^"]*(?:poly-component__title|ui-search-item__title)[^"]*"[^>]*>([^<]+)</) ||
-            chunk.match(/<h2[^>]*class="[^"]*poly-box[^"]*"[^>]*><a[^>]*>([^<]+)<\/a>/);
-          const tituloCard = matchTitulo ? matchTitulo[1].trim() : "";
-          if (isTituloCompativel(tituloCard, veiculoDetectado)) {
-            targetChunk = chunk;
-            matchTituloFinal = matchTitulo;
-            break;
-          }
-        }
+            const validacao = validarTituloML(tituloCard, veiculoDetectado, pecaPadronizada, queryLimpa);
+            if (!validacao.valido) {
+              continue;
+            }
 
-        if (targetChunk) {
-          const matchPreco = targetChunk.match(/class="[^"]*andes-money-amount__fraction[^"]*"[^>]*>([\d\.]+)/);
-          const matchCents = targetChunk.match(/class="[^"]*andes-money-amount__cents[^"]*"[^>]*>([\d]+)/);
-          const matchLink = targetChunk.match(/href="(https:\/\/[^"]*(?:mercadolivre\.com\.br\/[^\/]+\/up\/MLBU|produto\.mercadolivre\.com\.br\/MLB-|mercadolivre\.com\.br\/p\/MLB)[^"]*)"/);
-          const matchThumb = targetChunk.match(/(?:src|data-src)="(https:\/\/[^"]*(?:http2\.mlstatic\.com\/D_[^"]*))"/);
+            const matchPreco = chunk.match(/class="[^"]*andes-money-amount__fraction[^"]*"[^>]*>([\d\.]+)/);
+            const matchCents = chunk.match(/class="[^"]*andes-money-amount__cents[^"]*"[^>]*>([\d]+)/);
+            const matchLink = chunk.match(
+              /href="(https:\/\/[^"]*(?:mercadolivre\.com\.br\/[^\/]+\/up\/MLBU|produto\.mercadolivre\.com\.br\/MLB-|mercadolivre\.com\.br\/p\/MLB)[^"]*)"/
+            );
+            const matchThumb = chunk.match(/(?:src|data-src)="(https:\/\/[^"]*(?:http2\.mlstatic\.com\/D_[^"]*))"/);
 
-          if (matchPreco) {
-            const valorFormatado = matchPreco[1].replace(/\./g, "");
-            const centavos = matchCents ? matchCents[1] : "00";
-            const precoNumerico = parseFloat(`${valorFormatado}.${centavos}`);
+            if (matchPreco) {
+              const valorFormatado = matchPreco[1].replace(/\./g, "");
+              const centavos = matchCents ? matchCents[1] : "00";
+              const precoNumerico = parseFloat(`${valorFormatado}.${centavos}`);
 
-            if (precoNumerico > 0) {
-              const rawLink = matchLink
-                ? matchLink[1].replace(/&amp;/g, "&")
-                : `https://lista.mercadolivre.com.br/${encodeURIComponent(queryLimpa)}`;
-              const cleanLink = rawLink.split("#")[0].split("?")[0];
-              const linkAfiliado = formatarLinkAfiliado(cleanLink);
-              const thumb = matchThumb ? obterImagemAltaResolucao(matchThumb[1]) : null;
+              if (precoNumerico > 0) {
+                const rawLink = matchLink ? matchLink[1].replace(/&amp;/g, "&") : linkContingencia;
+                const cleanLink = rawLink.split("#")[0].split("?")[0];
+                const linkAfiliado = formatarLinkAfiliado(cleanLink);
+                const thumb = matchThumb ? obterImagemAltaResolucao(matchThumb[1]) : null;
 
-              return {
-                preco: precoNumerico,
-                preco_formatado: formatarPrecoBRL(precoNumerico),
-                link: linkAfiliado,
-                link_ml: cleanLink,
-                marca: deduzirMarca(matchTituloFinal?.[1]) || "Original / Homologada",
-                titulo: matchTituloFinal ? matchTituloFinal[1].trim() : queryLimpa,
-                tem_full:
-                  targetChunk.includes("full-badge") ||
-                  targetChunk.includes("Envio Full") ||
-                  targetChunk.includes("poly-component__fulfillment"),
-                thumbnail: thumb,
-              };
+                return {
+                  preco: precoNumerico,
+                  preco_formatado: formatarPrecoBRL(precoNumerico),
+                  link: linkAfiliado,
+                  link_ml: cleanLink,
+                  marca: deduzirMarca(tituloCard) || "Original / Homologada",
+                  titulo: tituloCard,
+                  tem_full:
+                    chunk.includes("full-badge") ||
+                    chunk.includes("Envio Full") ||
+                    chunk.includes("poly-component__fulfillment"),
+                  thumbnail: thumb,
+                };
+              }
             }
           }
         }
       }
     }
   } catch (err: any) {
-    // Segue para fallback final de mercado
+    // Scraping falhou ou bloqueado
   }
 
-  // 5. Fallback Seguro de Referência Aftermarket (garante que NUNCA fique null ou "Sob Consulta")
-  const ref = deduzirPrecoReferenciaMercado(queryLimpa, veiculoDetectado);
-  console.log(`[Referencia Aftermarket] Query: ${queryLimpa} -> R$ ${ref.preco}`);
-  const urlBuscaML = `https://lista.mercadolivre.com.br/${encodeURIComponent(queryLimpa)}`;
+  // 4. Se a busca por scraping falhar, for bloqueada ou nenhum anúncio for compatível:
+  // Retorna o link de contingência apontando diretamente para a busca filtrada no Mercado Livre
+  console.log(`[ML Contingência Acionada]: "${queryLimpa}" -> ${linkContingencia}`);
   return {
-    preco: ref.preco,
-    preco_formatado: formatarPrecoBRL(ref.preco),
-    link: urlBuscaML,
-    link_ml: urlBuscaML,
-    marca: ref.marca,
-    titulo: ref.titulo,
-    tem_full: true,
+    preco: null,
+    preco_formatado: "Sob Consulta",
+    link: linkContingencia,
+    link_ml: linkContingencia,
+    marca: "Original / Homologada",
+    titulo: pecaPadronizada || queryLimpa,
+    tem_full: false,
     thumbnail: null,
   };
 }
