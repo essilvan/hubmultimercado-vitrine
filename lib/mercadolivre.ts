@@ -142,8 +142,13 @@ export function obterImagemAltaResolucao(url?: string | null): string {
  * Anexa os identificadores de afiliado (matt_tool e matt_word) ao permalink
  */
 export function formatarLinkAfiliado(permalink: string): string {
-  const mattTool = process.env.ML_MATT_TOOL || "31976628";
-  const mattWord = process.env.ML_MATT_WORD || "hubmultimercado";
+  if (!permalink || typeof permalink !== "string") return "";
+  const mattTool =
+    (typeof process !== "undefined" && (process.env.NEXT_PUBLIC_ML_MATT_TOOL || process.env.ML_MATT_TOOL)) ||
+    "31976628";
+  const mattWord =
+    (typeof process !== "undefined" && (process.env.NEXT_PUBLIC_ML_MATT_WORD || process.env.ML_MATT_WORD)) ||
+    "hubmultimercado";
   const separator = permalink.includes("?") ? "&" : "?";
   return `${permalink}${separator}matt_tool=${mattTool}&matt_word=${mattWord}&forceInApp=true`;
 }
@@ -1416,7 +1421,8 @@ export function construirLinkContingenciaML(termoBusca: string): string {
     .replace(/[^a-zA-Z0-9\s-]/g, " ")
     .trim()
     .replace(/\s+/g, "-");
-  return `https://lista.mercadolivre.com.br/${encodeURIComponent(slug)}_ItemCondition_2230284_OrderId_PRICE_ASC`;
+  const rawUrl = `https://lista.mercadolivre.com.br/${encodeURIComponent(slug)}_ItemCondition_2230284_OrderId_PRICE_ASC`;
+  return formatarLinkAfiliado(rawUrl);
 }
 
 export interface OfertaRealML {

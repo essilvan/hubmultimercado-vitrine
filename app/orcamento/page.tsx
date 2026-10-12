@@ -30,6 +30,7 @@ import {
   Building2,
   Share2,
 } from "lucide-react";
+import { formatarLinkAfiliado } from "@/lib/mercadolivre";
 
 interface ItemOrcamento {
   peca_padronizada: string;
@@ -43,12 +44,25 @@ interface ItemOrcamento {
   termo_busca_mercadolivre?: string;
   confianca?: "alta" | "media" | "baixa";
   requer_confirmacao?: boolean;
-  // Campos de enriquecimento de preço REAL do Mercado Livre
-  preco?: number | null;
+
+  // Campos de enriquecimento de preço aceitando todas as variações
+  preco?: number | null | string;
+  price?: number | null | string;
+  valor?: number | null | string;
+  preco_ml?: number | null | string;
   preco_real_ml?: number | null;
   preco_formatado?: string | null;
+  preco_estimado?: number | null | string;
+
+  // Campos de links e afiliação direta
   link?: string | null;
   link_ml?: string | null;
+  link_afiliado?: string | null;
+  affiliate_link?: string | null;
+  url?: string | null;
+  permalink?: string | null;
+  slug?: string | null;
+
   marca?: string | null;
   titulo_anuncio?: string | null;
   link_anuncio?: string | null;
@@ -88,16 +102,90 @@ const EXEMPLOS_PRONTOS = [
 ];
 
 /**
- * Formata valores monetários estritamente com 2 casas decimais e moeda BRL
+ * Garante a formatação do preço em Real brasileiro (BRL) tratando números, strings ou nulos
  */
-function formatarMoeda(valor: number): string {
-  const num = Number(valor);
-  if (isNaN(num)) return "R$ 0,00";
-  return new Intl.NumberFormat("pt-BR", {
-    style: "currency",
-    currency: "BRL",
-  }).format(Number(num.toFixed(2)));
+const formatPrice = (val: any): string => {
+  if (val === null || val === undefined || val === "") return "Consulte o valor";
+  let num: number;
+  if (typeof val === "number") {
+    num = val;
+  } else {
+    const cleaned = String(val).replace(/[^0-9.,]/g, "").replace(",", ".");
+    num = parseFloat(cleaned);
+  }
+  return isNaN(num) || num <= 0
+    ? "Consulte o valor"
+    : num.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+};
+
+/**
+ * Formata valores monetários estritamente com 2 casas decimais e moeda BRL (compatibilidade)
+ */
+function formatarMoeda(valor: any): string {
+  return formatPrice(valor);
 }
+
+/**
+ * Extrai o valor numérico do preço aceitando todas as variações (preco ?? price ?? valor ?? preco_ml)
+ */
+const getNumericPrice = (item: ItemOrcamento | undefined | null): number => {
+  if (!item) return 0;
+  const val =
+    item.preco ??
+    item.price ??
+    item.valor ??
+    item.preco_ml ??
+    item.preco_real_ml ??
+    item.preco_estimado;
+
+  if (val === null || val === undefined || val === "") return 0;
+  if (typeof val === "number") return isNaN(val) || val <= 0 ? 0 : val;
+  const cleaned = String(val).replace(/[^0-9.,]/g, "").replace(",", ".");
+  const num = parseFloat(cleaned);
+  return isNaN(num) || num <= 0 ? 0 : num;
+};
+
+/**
+ * Retorna o link direto de afiliado do produto ou busca com tag de afiliado
+ */
+const getItemAffiliateUrl = (item: ItemOrcamento): string => {
+  // a) Priorize sempre o link direto de afiliado retornado do produto
+  const directUrl =
+    item.link_afiliado ||
+    item.affiliate_link ||
+    item.url ||
+    item.permalink ||
+    item.link_ml ||
+    item.link ||
+    item.link_anuncio ||
+    item.link_direto_anuncio;
+
+  if (directUrl && typeof directUrl === "string" && directUrl.trim()) {
+    const trimmed = directUrl.trim();
+    if (trimmed.startsWith("/")) return trimmed; // Rota interna /peca/[slug]
+    if (trimmed.includes("mercadolivre.com.br") && !trimmed.includes("matt_tool=")) {
+      return formatarLinkAfiliado(trimmed);
+    }
+    return trimmed;
+  }
+
+  // b) Se o item tiver slug gravado no banco produtos_afiliados
+  if (item.slug) {
+    return `/peca/${item.slug}`;
+  }
+
+  // c) Se o item for gerado dinamicamente pela IA e não tiver link na base, monta a busca com tag de afiliado
+  const termo =
+    item.termo_busca_ml ||
+    item.termo_busca_mercadolivre ||
+    item.query_busca ||
+    item.peca_padronizada ||
+    item.nome_peca ||
+    "";
+
+  const searchUrl = `https://lista.mercadolivre.com.br/${encodeURIComponent(termo)}_ItemCondition_2230284`;
+  return formatarLinkAfiliado(searchUrl);
+};
 
 /**
  * BOTÃO 1: Gera texto limpo e estruturado para a Visão Cliente Final (com preços e links)
@@ -129,22 +217,15 @@ function gerarTextoClienteFinal(
       const nome = item.peca_padronizada || item.nome_peca || "Peça";
       const posicao = item.posicao ? ` (${item.posicao})` : "";
       const marcaItem = item.marca_preferencial || item.marca_recomendada || item.marca || "Original / Homologada";
-      const precoNum = Number(item.preco ?? item.preco_real_ml) || 0;
+      const precoNum = getNumericPrice(item);
       const subtotal = qtd * precoNum;
 
-      const precoUnitTxt = precoNum > 0 ? formatarMoeda(precoNum) : "Sob Consulta";
+      const precoUnitTxt = precoNum > 0 ? formatPrice(precoNum) : "Consulte o valor";
       const valorLinha = qtd > 1 && precoNum > 0
-        ? `${qtd}x de ${precoUnitTxt} = ${formatarMoeda(subtotal)}`
+        ? `${qtd}x de ${precoUnitTxt} = ${formatPrice(subtotal)}`
         : precoUnitTxt;
 
-      let link =
-        item.link_ml ||
-        item.link ||
-        item.link_anuncio ||
-        item.link_direto_anuncio ||
-        `https://lista.mercadolivre.com.br/${encodeURIComponent(
-          item.termo_busca_mercadolivre || nome
-        )}`;
+      let link = getItemAffiliateUrl(item);
       if (link && link.startsWith("/")) {
         link = `https://hubmultimercado-vitrine.vercel.app${link}`;
       }
@@ -397,25 +478,25 @@ export default function OrcamentoPage() {
     }
   };
 
-  // Recálculo dinâmico baseado estritamente na multiplicação da quantidade pelo preço real de cada item
+  // Recálculo dinâmico baseado na soma de (quantidade * preço) de cada item
   const totalGeral = (resultado?.itens || []).reduce((acc, item) => {
     const qtd = Number(item.quantidade) || 1;
-    const preco = Number(item.preco ?? item.preco_real_ml) || 0;
+    const preco = getNumericPrice(item);
     return acc + (qtd * preco);
   }, 0);
 
   const totalSelecionado = (resultado?.itens || []).reduce((acc, item, idx) => {
     if (!itensSelecionados.includes(idx)) return acc;
     const qtd = Number(item.quantidade) || 1;
-    const preco = Number(item.preco ?? item.preco_real_ml) || 0;
+    const preco = getNumericPrice(item);
     return acc + (qtd * preco);
   }, 0);
 
   const totalFormatado =
-    totalSelecionado > 0 ? formatarMoeda(totalSelecionado) : "Sob Consulta";
+    totalSelecionado > 0 ? formatPrice(totalSelecionado) : "Consulte o valor";
 
   const totalGeralFormatado =
-    totalGeral > 0 ? formatarMoeda(totalGeral) : "Sob Consulta";
+    totalGeral > 0 ? formatPrice(totalGeral) : "Consulte o valor";
 
   const handleToggleItem = (idx: number) => {
     setItensSelecionados((prev) =>
@@ -473,7 +554,7 @@ export default function OrcamentoPage() {
   };
 
   // BOTÃO 3: "VER KIT COMPLETO NO MERCADO LIVRE"
-  // Ao clicar, abre diretamente em nova aba a busca unificada com os termos principais
+  // Ao clicar, abre diretamente em nova aba a busca unificada com os termos principais e parâmetro de afiliado
   const handleVerKitCompleto = () => {
     if (!resultado?.itens || resultado.itens.length === 0) return;
     const veiculo = resultado.veiculo || { modelo: resultado.veiculo_detectado || "" };
@@ -483,7 +564,7 @@ export default function OrcamentoPage() {
     const termoKit = `${veiculo.modelo || ""} kit ${itensEscolhidos
       .map((i) => i.peca_padronizada || i.nome_peca)
       .join(" ")}`.replace(/\s+/g, " ").trim();
-    const urlKit = `https://lista.mercadolivre.com.br/${encodeURIComponent(termoKit)}`;
+    const urlKit = formatarLinkAfiliado(`https://lista.mercadolivre.com.br/${encodeURIComponent(termoKit)}`);
     window.open(urlKit, "_blank");
   };
 
@@ -497,14 +578,7 @@ export default function OrcamentoPage() {
     );
 
     itensParaAbrir.forEach((item, index) => {
-      const urlFinal =
-        item.link_ml ||
-        item.link ||
-        item.link_anuncio ||
-        item.link_direto_anuncio ||
-        `https://lista.mercadolivre.com.br/${encodeURIComponent(
-          item.termo_busca_mercadolivre || item.peca_padronizada || item.nome_peca || ""
-        )}`;
+      const urlFinal = getItemAffiliateUrl(item);
 
       if (urlFinal) {
         setTimeout(() => {
@@ -912,19 +986,7 @@ Peças:
                   <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800 text-sm">
                     {resultado.itens.map((item, idx) => {
                       const isChecked = itensSelecionados.includes(idx);
-                      const termoBusca =
-                        item.termo_busca_ml ||
-                        item.termo_busca_mercadolivre ||
-                        item.query_busca ||
-                        item.peca_padronizada ||
-                        item.nome_peca ||
-                        "";
-                      const directUrl =
-                        item.link_ml ||
-                        item.link ||
-                        item.link_anuncio ||
-                        item.link_direto_anuncio ||
-                        `https://lista.mercadolivre.com.br/${encodeURIComponent(termoBusca)}`;
+                      const finalUrl = getItemAffiliateUrl(item);
                       const marcaNome =
                         item.marca ||
                         item.marcas_recomendadas ||
@@ -932,7 +994,7 @@ Peças:
                         item.marca_recomendada ||
                         "Original / Homologada";
                       const qtd = Number(item.quantidade) || 1;
-                      const precoUnit = Number(item.preco ?? item.preco_real_ml) || 0;
+                      const precoUnit = getNumericPrice(item);
                       const subtotal = qtd * precoUnit;
 
                       return (
@@ -1023,36 +1085,36 @@ Peças:
                             </span>
                           </td>
 
-                          {/* 5. Preço */}
+                          {/* 5. Preço formatado */}
                           <td className="py-3.5 px-4 align-middle text-right font-mono">
                             {precoUnit > 0 ? (
                               <div>
                                 <span className="font-bold text-sm text-emerald-600 dark:text-emerald-400 block leading-tight">
-                                  {formatarMoeda(subtotal)}
+                                  {formatPrice(subtotal)}
                                 </span>
                                 {qtd > 1 && (
                                   <span className="text-[10px] text-zinc-400 block">
-                                    {qtd}x de {formatarMoeda(precoUnit)}
+                                    {qtd}x de {formatPrice(precoUnit)}
                                   </span>
                                 )}
                               </div>
                             ) : (
                               <span className="text-xs text-zinc-400 font-sans">
-                                Sob Consulta
+                                {formatPrice(item.preco ?? item.price ?? item.valor ?? item.preco_ml)}
                               </span>
                             )}
                           </td>
 
-                          {/* 6. Botão sutil "Ver Oferta" */}
+                          {/* 6. Botão Comprar / Ver Peça */}
                           <td className="py-3.5 px-4 align-middle text-center">
                             <a
-                              href={item.link_ml || (termoBusca ? `https://lista.mercadolivre.com.br/${encodeURIComponent(termoBusca)}` : directUrl)}
+                              href={finalUrl}
                               target="_blank"
-                              rel="noopener noreferrer"
+                              rel="noopener noreferrer sponsored"
                               className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-xl bg-zinc-100 hover:bg-emerald-500 hover:text-zinc-950 dark:bg-zinc-800 dark:hover:bg-emerald-400 dark:hover:text-zinc-950 text-zinc-700 dark:text-zinc-300 text-xs font-bold transition cursor-pointer border border-zinc-200 dark:border-zinc-700 group"
-                              title={`Ver oferta de "${item.peca_padronizada || item.nome_peca}" no Mercado Livre`}
+                              title={`Comprar "${item.peca_padronizada || item.nome_peca}" no Mercado Livre`}
                             >
-                              <span>Ver Oferta ↗</span>
+                              <span>Ver Peça ↗</span>
                             </a>
                           </td>
                         </tr>
@@ -1375,18 +1437,7 @@ Peças:
               <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-3">
                 {resultado.itens.map((item, idx) => {
                   const isChecked = itensSelecionados.includes(idx);
-                  const termoBusca =
-                    item.termo_busca_mercadolivre ||
-                    item.query_busca ||
-                    item.peca_padronizada ||
-                    item.nome_peca ||
-                    "";
-                  const directLink =
-                    item.link_ml ||
-                    item.link ||
-                    item.link_anuncio ||
-                    item.link_direto_anuncio ||
-                    `https://lista.mercadolivre.com.br/${encodeURIComponent(termoBusca)}`;
+                  const finalUrl = getItemAffiliateUrl(item);
 
                   return (
                     <div
@@ -1469,19 +1520,19 @@ Peças:
                         <div className="text-right">
                           {(() => {
                             const qtd = Number(item.quantidade) || 1;
-                            const precoUnit = Number(item.preco ?? item.preco_real_ml) || 0;
+                            const precoUnit = getNumericPrice(item);
                             const subtotal = qtd * precoUnit;
 
                             return (
                               <>
                                 <span className="text-base font-black font-mono text-emerald-600 dark:text-emerald-400 block leading-tight">
                                   {subtotal > 0
-                                    ? formatarMoeda(subtotal)
-                                    : (item.preco_formatado || "Sob Consulta")}
+                                    ? formatPrice(subtotal)
+                                    : formatPrice(item.preco ?? item.price ?? item.valor ?? item.preco_ml)}
                                 </span>
                                 {qtd > 1 && precoUnit > 0 ? (
                                   <span className="text-[10px] text-zinc-400 block">
-                                    {qtd}x de {formatarMoeda(precoUnit)}
+                                    {qtd}x de {formatPrice(precoUnit)}
                                   </span>
                                 ) : null}
                               </>
@@ -1490,13 +1541,13 @@ Peças:
                         </div>
 
                         <a
-                          href={item.link_ml || (termoBusca ? `https://lista.mercadolivre.com.br/${encodeURIComponent(termoBusca)}` : directLink)}
+                          href={finalUrl}
                           target="_blank"
-                          rel="noopener noreferrer"
+                          rel="noopener noreferrer sponsored"
                           className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-zinc-100 dark:bg-zinc-800 hover:bg-emerald-500 hover:text-zinc-950 text-zinc-700 dark:text-zinc-300 text-xs font-bold transition shadow-xs cursor-pointer group"
-                          title="Abrir este produto diretamente no Mercado Livre"
+                          title="Comprar este produto diretamente no Mercado Livre"
                         >
-                          <span>Ver Oferta ↗</span>
+                          <span>Comprar no Mercado Livre ↗</span>
                         </a>
                       </div>
                     </div>
@@ -1697,25 +1748,21 @@ Peças:
                 </span>
                 <div className="max-h-48 overflow-y-auto space-y-1.5 pr-1">
                   {resultado.itens.map((item, idx) => {
-                    const termo =
-                      item.termo_busca_mercadolivre ||
-                      item.query_busca ||
-                      item.peca_padronizada ||
-                      item.nome_peca ||
-                      "";
+                    const finalUrl = getItemAffiliateUrl(item);
+                    const precoItem = getNumericPrice(item);
                     return (
                       <a
                         key={idx}
-                        href={`/api/redirect?query=${encodeURIComponent(termo)}`}
+                        href={finalUrl}
                         target="_blank"
-                        rel="noopener noreferrer"
+                        rel="noopener noreferrer sponsored"
                         className="flex items-center justify-between p-2.5 rounded-xl bg-zinc-50 dark:bg-zinc-800/60 hover:bg-zinc-100 dark:hover:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 text-xs transition"
                       >
                         <span className="font-semibold text-zinc-800 dark:text-zinc-200 truncate pr-2">
                           {idx + 1}. {item.peca_padronizada || item.nome_peca}
                         </span>
                         <span className="text-[11px] font-bold text-emerald-600 dark:text-emerald-400 flex items-center gap-1 shrink-0">
-                          <span>Abrir peça</span>
+                          <span>{precoItem > 0 ? formatPrice(precoItem) : "Ver Peça"}</span>
                           <ExternalLink className="w-3 h-3" />
                         </span>
                       </a>

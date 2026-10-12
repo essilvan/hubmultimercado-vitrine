@@ -1,11 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { GoogleGenerativeAI, SchemaType, type Part, type ResponseSchema } from "@google/generative-ai";
+import { supabase } from "@/lib/supabase";
 import {
   buscarPrecoMercadoLivre,
   buscarOfertaMercadoLivre,
   isTituloCompativel,
   validarTituloML,
   construirLinkContingenciaML,
+  formatarLinkAfiliado,
   type OfertaRealML,
 } from "@/lib/mercadolivre";
 
@@ -39,14 +41,26 @@ export interface ItemOrcamento {
   confianca?: "alta" | "media" | "baixa";
   requer_confirmacao?: boolean;
 
-  // Preço REAL do Mercado Livre (nunca estimado por IA)
+  // Preço e variações aceitas
   preco?: number | null;
+  price?: number | null;
+  valor?: number | null;
+  preco_ml?: number | null;
   preco_real_ml?: number | null;
   preco_formatado?: string | null;
   preco_medio?: string | null;
   preco_medio_estimado?: string | null;
+  preco_estimado?: number | null;
+  preco_estimado_unitario?: number | null;
+
+  // Links diretos e afiliados
   link?: string | null;
   link_ml?: string | null;
+  link_afiliado?: string | null;
+  affiliate_link?: string | null;
+  url?: string | null;
+  permalink?: string | null;
+  slug?: string | null;
   titulo_anuncio?: string | null;
   link_anuncio?: string | null;
   link_direto_anuncio?: string | null;
@@ -80,7 +94,8 @@ DIRETRIZES TÉCNICAS RÍGIDAS:
    - Exemplo Filtro de Óleo: 'Filtro Oleo HB20 1.0 3 Cilindros Mann Mahle Fram Wega'
    - Exemplo Pastilhas: 'Jogo Pastilha Freio Dianteira HB20 1.0 Cobreq Fras-le Bosch'
    - Exemplo Discos: 'Par Disco Freio Ventilado Dianteiro HB20 1.0 Fremax Hipper Freios'
-4. RETORNO OBRIGATÓRIO: Retorne exclusivamente JSON aderente ao responseSchema fornecido.`;
+4. PREÇO MÉDIO DE MERCADO (preco_estimado_unitario): Forneça o valor unitário estimado realista no mercado de autopeças brasileiro em Reais (float numérico, ex: 85.00 ou 180.00).
+5. RETORNO OBRIGATÓRIO: Retorne exclusivamente JSON aderente ao responseSchema fornecido.`;
 
 const RESPONSE_SCHEMA: ResponseSchema = {
   type: SchemaType.OBJECT,
@@ -105,6 +120,7 @@ const RESPONSE_SCHEMA: ResponseSchema = {
           posicao: { type: SchemaType.STRING, nullable: true },
           marcas_recomendadas: { type: SchemaType.STRING },
           termo_busca_ml: { type: SchemaType.STRING },
+          preco_estimado_unitario: { type: SchemaType.NUMBER, description: "Preço médio unitário de mercado em Reais (BRL)" },
         },
         required: ["peca_padronizada", "quantidade", "termo_busca_ml", "marcas_recomendadas"],
       },
@@ -114,7 +130,7 @@ const RESPONSE_SCHEMA: ResponseSchema = {
 };
 
 /**
- * Consulta e sincroniza os preços reais do Mercado Livre em paralelo com timeout rígido de 3.5s
+ * Consulta e sincroniza os preços reais do Mercado Livre e Supabase em paralelo com timeout rígido de 3.5s
  */
 async function sincronizarPrecosReais(orcamento: OrcamentoResposta): Promise<OrcamentoResposta> {
   if (!orcamento?.itens || orcamento.itens.length === 0) return orcamento;
@@ -132,90 +148,152 @@ async function sincronizarPrecosReais(orcamento: OrcamentoResposta): Promise<Orc
     orcamento.veiculo_detectado = partes.length > 0 ? partes.join(" ") : "Veículo Detectado";
   }
 
-  // Paraleliza as consultas ao Mercado Livre com AbortController de 3.5 segundos por requisição
+  // Paraleliza as consultas ao Supabase e Mercado Livre com AbortController de 3.5 segundos por requisição
   const resultados = await Promise.allSettled(
     orcamento.itens.map(async (item) => {
       const termoBusca = (item.termo_busca_ml || item.peca_padronizada || "").trim();
-      const linkFallback = `https://lista.mercadolivre.com.br/${encodeURIComponent(termoBusca)}_ItemCondition_2230284`;
+      const termoPeca = (item.peca_padronizada || "").trim();
+      const linkFallback = formatarLinkAfiliado(
+        `https://lista.mercadolivre.com.br/${encodeURIComponent(termoBusca)}_ItemCondition_2230284`
+      );
 
+      // 1. Verificação no Supabase: cruza com a tabela 'produtos_afiliados'
+      let produtoBanco: any = null;
+      try {
+        const { data: dbItems, error: dbError } = await supabase
+          .from("produtos_afiliados")
+          .select("id, titulo, slug, preco_estimado, link_afiliado, imagem_url")
+          .ilike("titulo", `%${termoPeca}%`)
+          .limit(1);
+
+        if (!dbError && dbItems && dbItems.length > 0) {
+          produtoBanco = dbItems[0];
+        }
+      } catch (errDb) {
+        console.warn("[Supabase] Aviso ao consultar produtos_afiliados:", errDb);
+      }
+
+      // 2. Busca de Preços no Mercado Livre com Timeout Rígido de 3.5s
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 3500);
+      let oferta: OfertaRealML | null = null;
 
       try {
-        // Chamada de busca com signal do controller
-        const oferta = await buscarOfertaMercadoLivre(
+        oferta = await buscarOfertaMercadoLivre(
           termoBusca,
           controller.signal,
           veiculo,
           item.peca_padronizada,
           item.quantidade
         );
-        clearTimeout(timeoutId);
-
-        const temPreco = oferta && typeof oferta.preco === "number" && oferta.preco > 0;
-        const precoNum = temPreco ? Number(oferta.preco) : null;
-        const precoFormatado = precoNum
-          ? new Intl.NumberFormat("pt-BR", {
-              style: "currency",
-              currency: "BRL",
-            }).format(Number(precoNum.toFixed(2)))
-          : "Sob Consulta";
-        const linkFinal = oferta?.link_ml || oferta?.link || linkFallback;
-
-        return {
-          ...item,
-          nome_peca: item.peca_padronizada,
-          termo_lido: item.peca_padronizada,
-          marca_recomendada: item.marcas_recomendadas,
-          marca_preferencial: item.marcas_recomendadas,
-          termo_busca_mercadolivre: item.termo_busca_ml,
-          query_busca: item.termo_busca_ml,
-          confianca: "alta" as const,
-          requer_confirmacao: false,
-          preco: precoNum,
-          preco_real_ml: precoNum,
-          preco_formatado: precoFormatado,
-          preco_medio: precoFormatado,
-          preco_medio_estimado: precoFormatado,
-          link: linkFinal,
-          link_ml: linkFinal,
-          link_anuncio: linkFinal,
-          link_direto_anuncio: linkFinal,
-          marca: oferta?.marca || item.marcas_recomendadas,
-          titulo_anuncio: oferta?.titulo || item.peca_padronizada || null,
-          tem_full: oferta?.tem_full || false,
-          thumbnail: oferta?.thumbnail || null,
-          preco_original: oferta?.original_price ? Number(oferta.original_price) : null,
-          preco_real: temPreco,
-        };
       } catch {
+        // Timeout ou erro de rede do Mercado Livre
+      } finally {
         clearTimeout(timeoutId);
-        return {
-          ...item,
-          nome_peca: item.peca_padronizada,
-          termo_lido: item.peca_padronizada,
-          marca_recomendada: item.marcas_recomendadas,
-          marca_preferencial: item.marcas_recomendadas,
-          termo_busca_mercadolivre: item.termo_busca_ml,
-          query_busca: item.termo_busca_ml,
-          confianca: "alta" as const,
-          requer_confirmacao: false,
-          preco: null,
-          preco_real_ml: null,
-          preco_formatado: "Sob Consulta",
-          preco_medio: "Sob Consulta",
-          preco_medio_estimado: "Sob Consulta",
-          link: linkFallback,
-          link_ml: linkFallback,
-          link_anuncio: linkFallback,
-          link_direto_anuncio: linkFallback,
-          marca: item.marcas_recomendadas,
-          titulo_anuncio: item.peca_padronizada || null,
-          tem_full: false,
-          thumbnail: null,
-          preco_real: false,
-        };
       }
+
+      // 3. Mapeamento e Exibição Correta do Preço:
+      // Trata variações: (item.preco ?? item.price ?? item.valor ?? item.preco_ml ?? produtoBanco ?? Gemini)
+      let precoNum: number | null = null;
+
+      if (oferta && typeof oferta.preco === "number" && oferta.preco > 0) {
+        precoNum = Number(oferta.preco);
+      } else if (produtoBanco) {
+        const valDb =
+          produtoBanco.preco ??
+          produtoBanco.price ??
+          produtoBanco.valor ??
+          produtoBanco.preco_ml ??
+          produtoBanco.preco_estimado;
+
+        if (typeof valDb === "number" && valDb > 0) {
+          precoNum = valDb;
+        } else if (valDb) {
+          const cleaned = String(valDb).replace(/[^0-9.,]/g, "").replace(",", ".");
+          const parsed = parseFloat(cleaned);
+          if (!isNaN(parsed) && parsed > 0) {
+            precoNum = parsed;
+          }
+        }
+      }
+
+      // Fallback para preço médio de mercado estimado pela IA se não encontrado no ML/banco
+      if (
+        precoNum === null &&
+        typeof (item as any).preco_estimado_unitario === "number" &&
+        (item as any).preco_estimado_unitario > 0
+      ) {
+        precoNum = Number((item as any).preco_estimado_unitario);
+      }
+
+      const precoFormatado = precoNum
+        ? new Intl.NumberFormat("pt-BR", {
+            style: "currency",
+            currency: "BRL",
+          }).format(Number(precoNum.toFixed(2)))
+        : "Consulte o valor";
+
+      // 4. Redirecionamento com Link de Afiliado Direto:
+      // a) Priorize sempre o link direto de afiliado retornado do produto
+      // b) Se não tiver link direto, rota interna (/peca/[slug]) ou busca com tag de afiliado
+      let finalUrl = linkFallback;
+      if (
+        produtoBanco?.link_afiliado &&
+        typeof produtoBanco.link_afiliado === "string" &&
+        produtoBanco.link_afiliado.trim()
+      ) {
+        finalUrl = produtoBanco.link_afiliado.trim();
+      } else if (oferta?.link && typeof oferta.link === "string" && oferta.link.trim()) {
+        finalUrl = formatarLinkAfiliado(oferta.link.trim());
+      } else if (produtoBanco?.slug) {
+        finalUrl = `/peca/${produtoBanco.slug}`;
+      } else if (oferta?.link_ml) {
+        finalUrl = formatarLinkAfiliado(oferta.link_ml);
+      }
+
+      const thumbnailFinal = oferta?.thumbnail || produtoBanco?.imagem_url || null;
+      const tituloAnuncioFinal = oferta?.titulo || produtoBanco?.titulo || item.peca_padronizada || null;
+
+      return {
+        ...item,
+        nome_peca: item.peca_padronizada,
+        termo_lido: item.peca_padronizada,
+        marca_recomendada: item.marcas_recomendadas,
+        marca_preferencial: item.marcas_recomendadas,
+        termo_busca_mercadolivre: item.termo_busca_ml,
+        query_busca: item.termo_busca_ml,
+        confianca: "alta" as const,
+        requer_confirmacao: false,
+
+        // Mapeamento de todas as variações de preço para total compatibilidade
+        preco: precoNum,
+        price: precoNum,
+        valor: precoNum,
+        preco_ml: precoNum,
+        preco_real_ml: precoNum,
+        preco_formatado: precoFormatado,
+        preco_medio: precoFormatado,
+        preco_medio_estimado: precoFormatado,
+        preco_estimado: precoNum,
+
+        // Mapeamento de links com afiliado direto
+        link: finalUrl,
+        link_ml: finalUrl,
+        link_afiliado: finalUrl,
+        affiliate_link: finalUrl,
+        url: finalUrl,
+        permalink: oferta?.link_ml || finalUrl,
+        link_anuncio: finalUrl,
+        link_direto_anuncio: finalUrl,
+        slug: produtoBanco?.slug || null,
+
+        marca: oferta?.marca || produtoBanco?.marca || item.marcas_recomendadas,
+        titulo_anuncio: tituloAnuncioFinal,
+        tem_full: oferta?.tem_full || false,
+        thumbnail: thumbnailFinal,
+        preco_original: oferta?.original_price ? Number(oferta.original_price) : null,
+        preco_real: precoNum !== null,
+      };
     })
   );
 
@@ -225,7 +303,14 @@ async function sincronizarPrecosReais(orcamento: OrcamentoResposta): Promise<Orc
     }
     const item = orcamento.itens[index];
     const termoBusca = (item.termo_busca_ml || item.peca_padronizada || "").trim();
-    const linkFallback = `https://lista.mercadolivre.com.br/${encodeURIComponent(termoBusca)}_ItemCondition_2230284`;
+    const linkFallback = formatarLinkAfiliado(
+      `https://lista.mercadolivre.com.br/${encodeURIComponent(termoBusca)}_ItemCondition_2230284`
+    );
+    const precoNum =
+      typeof (item as any).preco_estimado_unitario === "number"
+        ? Number((item as any).preco_estimado_unitario)
+        : null;
+
     return {
       ...item,
       nome_peca: item.peca_padronizada,
@@ -234,26 +319,37 @@ async function sincronizarPrecosReais(orcamento: OrcamentoResposta): Promise<Orc
       marca_preferencial: item.marcas_recomendadas,
       termo_busca_mercadolivre: item.termo_busca_ml,
       query_busca: item.termo_busca_ml,
-      preco: null,
-      preco_real_ml: null,
-      preco_formatado: "Sob Consulta",
-      preco_medio: "Sob Consulta",
-      preco_medio_estimado: "Sob Consulta",
+      preco: precoNum,
+      price: precoNum,
+      valor: precoNum,
+      preco_ml: precoNum,
+      preco_real_ml: precoNum,
+      preco_formatado: precoNum
+        ? new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(Number(precoNum.toFixed(2)))
+        : "Consulte o valor",
+      preco_medio: "Consulte o valor",
+      preco_medio_estimado: "Consulte o valor",
+      preco_estimado: precoNum,
       link: linkFallback,
       link_ml: linkFallback,
+      link_afiliado: linkFallback,
+      affiliate_link: linkFallback,
+      url: linkFallback,
+      permalink: linkFallback,
       link_anuncio: linkFallback,
       link_direto_anuncio: linkFallback,
       marca: item.marcas_recomendadas,
       titulo_anuncio: null,
       tem_full: false,
       thumbnail: null,
-      preco_real: false,
+      preco_real: precoNum !== null,
     };
   });
 
   // Recalcula o total_estimado somando estritamente os subtotais: (quantidade * preco)
   const totalNum = (orcamento.itens || []).reduce((acc, it) => {
-    const preco = Number(it.preco ?? it.preco_real_ml) || 0;
+    const preco =
+      Number(it.preco ?? it.price ?? it.valor ?? it.preco_ml ?? it.preco_real_ml ?? it.preco_estimado) || 0;
     const qtd = Number(it.quantidade) || 1;
     return acc + qtd * preco;
   }, 0);
@@ -264,7 +360,7 @@ async function sincronizarPrecosReais(orcamento: OrcamentoResposta): Promise<Orc
       currency: "BRL",
     }).format(Number(totalNum.toFixed(2)));
   } else {
-    orcamento.total_estimado = "Sob Consulta";
+    orcamento.total_estimado = "Consulte o valor";
   }
 
   return orcamento;
@@ -426,6 +522,7 @@ export async function POST(request: NextRequest) {
         posicao: it.posicao || null,
         marcas_recomendadas: it.marcas_recomendadas || "Original / Homologada",
         termo_busca_ml: it.termo_busca_ml,
+        preco_estimado_unitario: typeof it.preco_estimado_unitario === "number" ? it.preco_estimado_unitario : null,
       })),
     };
 
