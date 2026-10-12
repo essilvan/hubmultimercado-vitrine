@@ -385,7 +385,9 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const apiKey = (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || "").trim();
+    const apiKey = (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || "")
+      .trim()
+      .replace(/^["']|["']$/g, "");
 
     // Validação estrita da chave da API Gemini: sem fallback cego
     if (!apiKey) {
@@ -430,10 +432,12 @@ export async function POST(request: NextRequest) {
     // Modelos suportados pela API Gemini em ordem de prioridade (Flash rápido para responder em < 2s)
     const modelsToTry = [
       process.env.GEMINI_MODEL,
-      "gemini-1.5-flash",
-      "gemini-2.5-flash",
       "gemini-flash-latest",
-      "gemini-2.5-flash-lite",
+      "gemini-3.8-flash",
+      "gemini-2.5-flash",
+      "gemini-3.5-flash-lite",
+      "gemini-flash-lite-latest",
+      "gemini-1.5-flash",
     ].filter(Boolean) as string[];
 
     let rawJsonContent: string | null = null;

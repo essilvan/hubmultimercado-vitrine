@@ -143,6 +143,7 @@ export function obterImagemAltaResolucao(url?: string | null): string {
  */
 export function formatarLinkAfiliado(permalink: string): string {
   if (!permalink || typeof permalink !== "string") return "";
+  if (permalink.includes("matt_tool=")) return permalink;
   const mattTool =
     (typeof process !== "undefined" && (process.env.NEXT_PUBLIC_ML_MATT_TOOL || process.env.ML_MATT_TOOL)) ||
     "31976628";
