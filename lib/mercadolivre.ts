@@ -1438,12 +1438,13 @@ export async function buscarPrecoMercadoLivre(
   termoBusca: string,
   veiculoDetectado?: { marca?: string | null; modelo?: string | null; ano?: string | null; motorizacao?: string | null } | string | null,
   pecaPadronizada?: string | null,
-  quantidade?: number | null
+  quantidade?: number | null,
+  signal?: AbortSignal
 ): Promise<OfertaRealML> {
   const queryLimpa = (termoBusca || "").trim();
   const linkContingencia = construirLinkContingenciaML(queryLimpa);
 
-  if (!queryLimpa) {
+  if (!queryLimpa || signal?.aborted) {
     return {
       preco: null,
       preco_formatado: "Sob Consulta",
@@ -1461,6 +1462,7 @@ export async function buscarPrecoMercadoLivre(
 
   // 2. Requisição para a API oficial do Mercado Livre (se acessível)
   try {
+    if (signal?.aborted) throw new Error("Busca abortada");
     const apiUrl = `https://api.mercadolibre.com/sites/MLB/search?q=${encodeURIComponent(queryLimpa)}&limit=15`;
     const headers: Record<string, string> = {
       Accept: "application/json",
@@ -1473,7 +1475,7 @@ export async function buscarPrecoMercadoLivre(
 
     const res = await fetch(apiUrl, {
       headers,
-      signal: AbortSignal.timeout(6000),
+      signal: signal || AbortSignal.timeout(3500),
     });
 
     if (res.ok) {
@@ -1528,6 +1530,7 @@ export async function buscarPrecoMercadoLivre(
 
   // 3. Busca por Web Scraping com Googlebot User-Agent e ordenação por menor preço
   try {
+    if (signal?.aborted) throw new Error("Busca abortada");
     const slug = encodeURIComponent(
       queryLimpa
         .normalize("NFD")
@@ -1543,13 +1546,14 @@ export async function buscarPrecoMercadoLivre(
     ];
 
     for (const searchUrl of urlsParaTentar) {
+      if (signal?.aborted) break;
       const res = await fetch(searchUrl, {
         headers: {
           "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
           Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
           "Accept-Language": "pt-BR,pt;q=0.9",
         },
-        signal: AbortSignal.timeout(6000),
+        signal: signal || AbortSignal.timeout(3500),
       });
 
       if (res.ok) {
@@ -1627,6 +1631,19 @@ export async function buscarPrecoMercadoLivre(
     tem_full: false,
     thumbnail: null,
   };
+}
+
+/**
+ * Busca oferta do Mercado Livre com AbortSignal para timeout rápido (compatível com a API de orçamento)
+ */
+export async function buscarOfertaMercadoLivre(
+  termoBusca: string,
+  signal?: AbortSignal,
+  veiculoDetectado?: { marca?: string | null; modelo?: string | null; ano?: string | null; motorizacao?: string | null } | string | null,
+  pecaPadronizada?: string | null,
+  quantidade?: number | null
+): Promise<OfertaRealML> {
+  return buscarPrecoMercadoLivre(termoBusca, veiculoDetectado, pecaPadronizada, quantidade, signal);
 }
 
 /**

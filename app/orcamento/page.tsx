@@ -359,9 +359,23 @@ export default function OrcamentoPage() {
         body: formData,
       });
 
+      if (!res.ok) {
+        const erroTexto = await res.text();
+        let mensagemErro = `Erro no servidor (${res.status}): ${erroTexto.slice(0, 100)}`;
+        try {
+          const parsed = JSON.parse(erroTexto);
+          if (parsed?.error) {
+            mensagemErro = parsed.error;
+          }
+        } catch {
+          // Mantém mensagem formatada com o status e trecho da resposta
+        }
+        throw new Error(mensagemErro);
+      }
+
       const data = await res.json();
 
-      if (!res.ok || !data.success || !data.data) {
+      if (!data.success || !data.data) {
         throw new Error(data.error || "Não foi possível analisar o orçamento.");
       }
 
