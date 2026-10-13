@@ -66,7 +66,7 @@ async function obterTokenMercadoLivre(): Promise<string | null> {
 }
 
 // ============================================================================
-// 2. EXTRAÇÃO COM GEMINI (gemini-2.5-flash)
+// 2. EXTRAÇÃO COM GEMINI (gemini-3.8-flash)
 // ============================================================================
 const SYSTEM_INSTRUCTION = `Você é um extrator técnico automotivo especializado do PeçasFinder.
 Sua missão é extrair estritamente as informações mecânicas do orçamento (imagem ou texto) com foco cirúrgico no cabeçalho do veículo e na lista de peças de reposição.
@@ -344,9 +344,9 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Instanciação do modelo rápido gemini-2.5-flash
+    // Instanciação do modelo rápido gemini-3.8-flash
     const model = genAI.getGenerativeModel({
-      model: "gemini-2.5-flash",
+      model: "gemini-3.8-flash",
       systemInstruction: SYSTEM_INSTRUCTION,
       generationConfig: {
         responseMimeType: "application/json",
