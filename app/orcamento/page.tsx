@@ -61,6 +61,7 @@ interface ItemOrcamento {
   // Campos de links e afiliação direta
   link?: string | null;
   link_ml?: string | null;
+  linkAfiliado?: string | null;
   link_afiliado?: string | null;
   affiliate_link?: string | null;
   url?: string | null;
@@ -72,6 +73,7 @@ interface ItemOrcamento {
   titulo?: string | null;
   link_anuncio?: string | null;
   tem_full?: boolean;
+  imagem?: string | null;
   thumbnail?: string | null;
   imagem_url?: string | null;
   encontrado?: boolean;
@@ -161,6 +163,7 @@ const getNumericPrice = (item: ItemOrcamento | undefined | null): number => {
 const getItemAffiliateUrl = (item: ItemOrcamento): string => {
   // a) Priorize sempre o link direto de afiliado retornado do produto
   const directUrl =
+    item.linkAfiliado ||
     item.link_afiliado ||
     item.affiliate_link ||
     item.url ||
@@ -506,17 +509,17 @@ export default function OrcamentoPage() {
     }
   };
 
-  // Recálculo dinâmico baseado na soma de (quantidade * preço) de cada item
+  // Recálculo dinâmico baseado na soma numérica de (quantidade * preço) de cada item
   const totalGeral = (resultado?.itens || []).reduce((acc, item) => {
     const qtd = Number(item.quantidade) || 1;
-    const preco = getNumericPrice(item);
+    const preco = typeof item.preco === "number" && item.preco > 0 ? item.preco : getNumericPrice(item);
     return acc + (qtd * preco);
   }, 0);
 
   const totalSelecionado = (resultado?.itens || []).reduce((acc, item, idx) => {
     if (!itensSelecionados.includes(idx)) return acc;
     const qtd = Number(item.quantidade) || 1;
-    const preco = getNumericPrice(item);
+    const preco = typeof item.preco === "number" && item.preco > 0 ? item.preco : getNumericPrice(item);
     return acc + (qtd * preco);
   }, 0);
 
@@ -1015,11 +1018,11 @@ Peças:
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5 p-6 bg-zinc-50/40 dark:bg-zinc-950/30">
                   {resultado.itens.map((item, idx) => {
                     const isChecked = itensSelecionados.includes(idx);
-                    const finalUrl = getItemAffiliateUrl(item);
-                    const precoNum = getNumericPrice(item);
-                    const tituloReal = item.titulo_anuncio || item.titulo || item.nome || item.peca_padronizada || "Peça Automotiva";
+                    const finalUrl = item.linkAfiliado || item.link_afiliado || getItemAffiliateUrl(item);
+                    const precoNum = typeof item.preco === "number" && item.preco > 0 ? item.preco : getNumericPrice(item);
+                    const tituloReal = item.titulo || item.titulo_anuncio || item.nome || item.peca_padronizada || "Peça Automotiva";
                     const nomePeca = item.nome || item.peca_padronizada || "Peça";
-                    const imagemReal = item.imagem_url || item.thumbnail;
+                    const imagemReal = item.imagem || item.imagem_url || item.thumbnail;
 
                     return (
                       <div
@@ -1141,7 +1144,7 @@ Peças:
                     <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800 text-sm">
                       {resultado.itens.map((item, idx) => {
                         const isChecked = itensSelecionados.includes(idx);
-                        const finalUrl = getItemAffiliateUrl(item);
+                        const finalUrl = item.linkAfiliado || item.link_afiliado || getItemAffiliateUrl(item);
                         const marcaNome =
                           item.marca ||
                           item.marcas_recomendadas ||
@@ -1149,10 +1152,10 @@ Peças:
                           item.marca_recomendada ||
                           "Original / Homologada";
                         const qtd = Number(item.quantidade) || 1;
-                        const precoUnit = getNumericPrice(item);
+                        const precoUnit = typeof item.preco === "number" && item.preco > 0 ? item.preco : getNumericPrice(item);
                         const subtotal = qtd * precoUnit;
-                        const tituloReal = item.titulo_anuncio || item.titulo || item.nome || item.peca_padronizada || "Peça";
-                        const imagemReal = item.imagem_url || item.thumbnail;
+                        const tituloReal = item.titulo || item.titulo_anuncio || item.nome || item.peca_padronizada || "Peça";
+                        const imagemReal = item.imagem || item.imagem_url || item.thumbnail;
 
                         return (
                           <tr
@@ -1569,9 +1572,9 @@ Peças:
               <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-3">
                 {resultado.itens.map((item, idx) => {
                   const isChecked = itensSelecionados.includes(idx);
-                  const finalUrl = getItemAffiliateUrl(item);
-                  const imagemReal = item.imagem_url || item.thumbnail;
-                  const tituloReal = item.titulo_anuncio || item.titulo || item.nome || item.peca_padronizada || "Peça";
+                  const finalUrl = item.linkAfiliado || item.link_afiliado || getItemAffiliateUrl(item);
+                  const imagemReal = item.imagem || item.imagem_url || item.thumbnail;
+                  const tituloReal = item.titulo || item.titulo_anuncio || item.nome || item.peca_padronizada || "Peça";
 
                   return (
                     <div
