@@ -111,23 +111,123 @@ interface MLSearchResult {
 }
 
 /**
+ * Modelos conhecidos do mercado brasileiro para deteccao de conflitos
+ */
+const MODELOS_CONCORRENTES = [
+  "onix", "prisma", "celta", "corsa", "cruze", "tracker", "spin", "s10", "montana", "astra", "vectra",
+  "gol", "fox", "polo", "voyage", "saveiro", "up", "virtus", "nivus", "t-cross", "golf", "jetta",
+  "palio", "uno", "strada", "toro", "mobi", "argo", "cronos", "fiorino", "siena", "punto",
+  "hb20", "creta", "tucson", "i30", "ix35",
+  "ka", "fiesta", "ecosport", "focus", "fusion", "ranger",
+  "corolla", "hilux", "yaris", "etios",
+  "civic", "fit", "city", "hrv", "crv",
+  "sandero", "logan", "duster", "kwid", "captur", "clio",
+  "kicks", "march", "versa", "frontier", "sentra",
+  "renegade", "compass", "commander",
+  "206", "207", "208", "2008", "3008",
+  "c3", "c4"
+];
+
+/**
+ * Extrai o modelo principal do veículo em lowercase limpo (ex: "onix", "civic", "hb20", "toro", "gol")
+ */
+function extrairModeloPrincipal(veiculo: string): string {
+  if (!veiculo || typeof veiculo !== "string") return "";
+
+  const marcas = [
+    "chevrolet", "gm", "volkswagen", "vw", "fiat", "ford", "hyundai", "toyota",
+    "honda", "renault", "nissan", "jeep", "peugeot", "citroen", "citroën", "mitsubishi",
+    "audi", "bmw", "mercedes-benz", "mercedes", "kia", "chery", "caoa chery", "byd"
+  ];
+
+  const descartes = [
+    "freedom", "volcano", "endurance", "ranch", "ultra", "trekking", "drive", "precision",
+    "attactive", "sporting", "hgt", "way", "fire", "firefly", "evo", "ea111", "msi", "tsi",
+    "comfortline", "highline", "trendline", "cross", "track", "joy", "lt", "ltz", "premier",
+    "active", "evolution", "zen", "intense", "iconic", "outsider", "sense", "advance", "exclusive",
+    "lx", "lxs", "ex", "exl", "touring", "gli", "xei", "altis", "gr-s", "longitude", "trailhawk",
+    "limited", "sedan", "hatch", "suv", "pickup", "picape", "sw", "wagon", "total flex", "flex",
+    "diesel", "gasolina", "alcool", "gnv", "turbo", "aspirado", "manual", "automatico", "aut"
+  ];
+
+  let limpo = veiculo
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim();
+
+  // Remove marcas conhecidas
+  for (const m of marcas) {
+    limpo = limpo.replace(new RegExp(`\\b${m}\\b`, "gi"), " ");
+  }
+
+  // Remove anos de 4 dígitos (ex: 2016, 2018) e motorizações (ex: 1.0, 2.0, 16v, 8v)
+  limpo = limpo.replace(/\b(19\d\d|20\d\d)\b/g, " ");
+  limpo = limpo.replace(/\b\d+\.\d+\b/g, " ");
+  limpo = limpo.replace(/\b\d+v\b/g, " ");
+  limpo = limpo.replace(/[^a-z0-9\s-]/g, " ");
+
+  const tokens = limpo.split(/\s+/).filter((t) => t.length >= 2);
+  const modeloValido = tokens.find((t) => !descartes.includes(t)) || tokens[0] || "";
+  return modeloValido.trim();
+}
+
+/**
+ * Validação de compatibilidade do título do anúncio com o modelo do carro
+ */
+function isTituloCompativelComModelo(titulo: string, modeloPrincipal: string): boolean {
+  if (!titulo) return false;
+  const titLower = titulo.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  if (!modeloPrincipal) return true;
+
+  const modLower = modeloPrincipal.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const contemModelo = new RegExp(`\\b${modLower}\\b`, "i").test(titLower) || titLower.includes(modLower);
+
+  const outrosConflitantes = MODELOS_CONCORRENTES.filter((m) => m !== modLower);
+  const temConcorrente = outrosConflitantes.some((concorrente) => {
+    return new RegExp(`\\b${concorrente}\\b`, "i").test(titLower);
+  });
+
+  // Se o título menciona um concorrente (ex: Civic, Gol) e NÃO menciona o modelo do carro, é incompatível!
+  if (temConcorrente && !contemModelo) {
+    return false;
+  }
+
+  return contemModelo;
+}
+
+/**
  * ETAPA 2 - Busca Oficial em Tempo Real na API do Mercado Livre (MLB1747)
  * Categoria MLB1747 restringe estritamente para Peças de Carros e Caminhonetes.
+ * Traz os 5 primeiros resultados e faz varredura filtrando pelo modelo exato do veículo.
  */
 async function buscarItemMercadoLivre(
-  termoBusca: string,
+  termoBuscaOriginal: string,
   nomePeca: string,
+  veiculoCompleto: string,
   signal?: AbortSignal
 ): Promise<MLSearchResult> {
-  const queryLimpa = termoBusca.trim();
+  const modeloPrincipal = extrairModeloPrincipal(veiculoCompleto); // ex: 'onix', 'toro', 'civic'
+
+  // 1. Montagem do termo de busca cirúrgico:
+  // Garante o nome da peça + modelo principal
+  let termoBuscaCirurgico = termoBuscaOriginal.trim();
+  if (modeloPrincipal) {
+    const termoLower = termoBuscaCirurgico.toLowerCase();
+    const modeloLower = modeloPrincipal.toLowerCase();
+    if (!termoLower.includes(modeloLower)) {
+      termoBuscaCirurgico = `${nomePeca} ${modeloPrincipal}`.trim();
+    }
+  }
+
   const linkFallback = formatarLinkAfiliado(
-    `https://lista.mercadolivre.com.br/${encodeURIComponent(queryLimpa)}_ItemCondition_2230284`
+    `https://lista.mercadolivre.com.br/${encodeURIComponent(termoBuscaCirurgico)}_ItemCondition_2230284`
   );
 
-  // 1. Consulta direta na API oficial do Mercado Livre com categoria restrita MLB1747
+  // 2. Consulta à API Oficial do Mercado Livre trazendo até 5 resultados (limit=5)
   const endpointML = `https://api.mercadolibre.com/sites/MLB/search?q=${encodeURIComponent(
-    queryLimpa
-  )}&category=MLB1747&limit=1`;
+    termoBuscaCirurgico
+  )}&category=MLB1747&limit=5`;
 
   try {
     const res = await fetch(endpointML, {
@@ -142,77 +242,129 @@ async function buscarItemMercadoLivre(
 
     if (res.ok) {
       const data = await res.json();
-      const firstItem = data.results && data.results.length > 0 ? data.results[0] : null;
+      const results: any[] = Array.isArray(data.results) ? data.results : [];
 
-      if (firstItem) {
-        const tituloReal = firstItem.title || nomePeca;
-        const precoReal =
-          typeof firstItem.price === "number" && firstItem.price > 0
-            ? Number(firstItem.price)
-            : null;
+      if (results.length > 0) {
+        // Varredura nos 5 itens procurando o primeiro compatível com o modelo do carro
+        let itemCompativel: any = null;
 
-        let imagemAltaRes = firstItem.thumbnail || null;
-        if (imagemAltaRes) {
-          imagemAltaRes = imagemAltaRes
-            .replace("-I.jpg", "-O.jpg")
-            .replace("-I.webp", "-O.webp")
-            .replace("-V.jpg", "-O.jpg")
-            .replace(/^http:\/\//i, "https://");
+        if (modeloPrincipal) {
+          // 1º: Procura item cujo título contenha explicitamente o modelo do veículo
+          itemCompativel = results.find((item) => {
+            if (!item?.title) return false;
+            return isTituloCompativelComModelo(item.title, modeloPrincipal);
+          });
+
+          // 2º: Se nenhum tiver o modelo explícito, procura um que ao menos NÃO contenha modelos concorrentes
+          if (!itemCompativel) {
+            itemCompativel = results.find((item) => {
+              if (!item?.title) return false;
+              const titLower = item.title.toLowerCase();
+              const outrosConflitantes = MODELOS_CONCORRENTES.filter((m) => m !== modeloPrincipal.toLowerCase());
+              const temConflito = outrosConflitantes.some((c) => new RegExp(`\\b${c}\\b`, "i").test(titLower));
+              return !temConflito;
+            });
+          }
+        } else {
+          itemCompativel = results[0];
         }
 
-        const linkAnuncio = formatarLinkAfiliado(firstItem.permalink || linkFallback);
+        // Validação final de conflito: se o item retornado tiver modelo conflitante e não tiver o modelo do carro, descarte
+        if (itemCompativel && itemCompativel.title && modeloPrincipal) {
+          const titLower = itemCompativel.title.toLowerCase();
+          const contemModelo = titLower.includes(modeloPrincipal.toLowerCase());
+          const outrosConflitantes = MODELOS_CONCORRENTES.filter((m) => m !== modeloPrincipal.toLowerCase());
+          const temConflito = outrosConflitantes.some((c) => new RegExp(`\\b${c}\\b`, "i").test(titLower));
+
+          if (temConflito && !contemModelo) {
+            itemCompativel = null;
+          }
+        }
+
+        if (itemCompativel) {
+          const tituloReal = itemCompativel.title || nomePeca;
+          const precoReal =
+            typeof itemCompativel.price === "number" && itemCompativel.price > 0
+              ? Number(itemCompativel.price)
+              : null;
+
+          let imagemAltaRes = itemCompativel.thumbnail || null;
+          if (imagemAltaRes) {
+            imagemAltaRes = imagemAltaRes
+              .replace("-I.jpg", "-O.jpg")
+              .replace("-I.webp", "-O.webp")
+              .replace("-V.jpg", "-O.jpg")
+              .replace(/^http:\/\//i, "https://");
+          }
+
+          const linkAnuncio = formatarLinkAfiliado(itemCompativel.permalink || linkFallback);
+
+          return {
+            titulo_anuncio: tituloReal,
+            preco: precoReal,
+            imagem_url: imagemAltaRes,
+            link: linkAnuncio,
+            encontrado: true,
+          };
+        }
+      }
+    }
+  } catch {
+    // API externa indisponível ou timeout
+  }
+
+  // 3. Consulta de contingência no Supabase filtrando obrigatoriamente por modelo para não misturar carros
+  try {
+    let queryDb = supabase
+      .from("produtos_afiliados")
+      .select("id, titulo, slug, preco_estimado, link_afiliado, imagem_url")
+      .ilike("titulo", `%${nomePeca}%`);
+
+    if (modeloPrincipal) {
+      queryDb = queryDb.ilike("titulo", `%${modeloPrincipal}%`);
+    }
+
+    const { data: dbItems } = await queryDb.limit(5);
+
+    if (dbItems && dbItems.length > 0) {
+      const dbProdValido = dbItems.find((item: any) => {
+        if (!item?.titulo) return false;
+        if (modeloPrincipal) {
+          return isTituloCompativelComModelo(item.titulo, modeloPrincipal);
+        }
+        return true;
+      });
+
+      if (dbProdValido) {
+        let precoDb: number | null = null;
+        if (dbProdValido.preco_estimado) {
+          const cleaned = String(dbProdValido.preco_estimado).replace(/[^0-9.,]/g, "").replace(",", ".");
+          const parsed = parseFloat(cleaned);
+          if (!isNaN(parsed) && parsed > 0) {
+            precoDb = parsed;
+          }
+        }
+
+        const linkDb = dbProdValido.link_afiliado
+          ? formatarLinkAfiliado(dbProdValido.link_afiliado)
+          : dbProdValido.slug
+          ? `/peca/${dbProdValido.slug}`
+          : linkFallback;
 
         return {
-          titulo_anuncio: tituloReal,
-          preco: precoReal,
-          imagem_url: imagemAltaRes,
-          link: linkAnuncio,
+          titulo_anuncio: dbProdValido.titulo || nomePeca,
+          preco: precoDb,
+          imagem_url: dbProdValido.imagem_url || null,
+          link: linkDb,
           encontrado: true,
         };
       }
     }
   } catch {
-    // API oficial externa indisponível ou timeout
-  }
-
-  // 2. Consulta de contingência no Supabase (produtos_afiliados cadastrados no catálogo)
-  try {
-    const { data: dbItems } = await supabase
-      .from("produtos_afiliados")
-      .select("id, titulo, slug, preco_estimado, link_afiliado, imagem_url")
-      .ilike("titulo", `%${nomePeca}%`)
-      .limit(1);
-
-    if (dbItems && dbItems.length > 0) {
-      const dbProd = dbItems[0];
-      let precoDb: number | null = null;
-      if (dbProd.preco_estimado) {
-        const cleaned = String(dbProd.preco_estimado).replace(/[^0-9.,]/g, "").replace(",", ".");
-        const parsed = parseFloat(cleaned);
-        if (!isNaN(parsed) && parsed > 0) {
-          precoDb = parsed;
-        }
-      }
-
-      const linkDb = dbProd.link_afiliado
-        ? formatarLinkAfiliado(dbProd.link_afiliado)
-        : dbProd.slug
-        ? `/peca/${dbProd.slug}`
-        : linkFallback;
-
-      return {
-        titulo_anuncio: dbProd.titulo || nomePeca,
-        preco: precoDb,
-        imagem_url: dbProd.imagem_url || null,
-        link: linkDb,
-        encontrado: true,
-      };
-    }
-  } catch {
     // Supabase indisponível
   }
 
-  // 3. Fallback estrito: Preço null e link apontando para busca geral do termo no ML com tag de afiliado
+  // 4. Fallback estrito: Preço null e link apontando para busca cirúrgica do termo no ML com tag de afiliado
   return {
     titulo_anuncio: null,
     preco: null,
@@ -383,6 +535,7 @@ export async function POST(request: NextRequest) {
           const resultado = await buscarItemMercadoLivre(
             peca.termo_busca,
             peca.nome,
+            veiculoDetectado,
             controller.signal
           );
           clearTimeout(timeoutId);
