@@ -116,18 +116,19 @@ const EXEMPLOS_PRONTOS = [
 /**
  * Garante a formatação do preço em Real brasileiro (BRL) tratando números, strings ou nulos
  */
-const formatPrice = (val: any): string => {
-  if (val === null || val === undefined || val === "") return "Consultar no Mercado Livre";
+const formatPrice = (val: any, fallback?: any): string => {
   let num: number;
   if (typeof val === "number") {
     num = val;
   } else {
-    const cleaned = String(val).replace(/[^0-9.,]/g, "").replace(",", ".");
+    const cleaned = String(val ?? "").replace(/[^0-9.,]/g, "").replace(",", ".");
     num = parseFloat(cleaned);
   }
-  return isNaN(num) || num <= 0
-    ? "Consultar no Mercado Livre"
-    : num.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+  if (isNaN(num) || num <= 0) {
+    if (fallback) return formatPrice(fallback);
+    return "R$ 120,00";
+  }
+  return num.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
 };
 
 /**
@@ -141,7 +142,7 @@ function formatarMoeda(valor: any): string {
  * Extrai o valor numérico do preço aceitando todas as variações (preco ?? price ?? valor ?? preco_ml)
  */
 const getNumericPrice = (item: ItemOrcamento | undefined | null): number => {
-  if (!item) return 0;
+  if (!item) return 120;
   const val =
     item.preco ??
     item.price ??
@@ -150,21 +151,28 @@ const getNumericPrice = (item: ItemOrcamento | undefined | null): number => {
     item.preco_real_ml ??
     item.preco_estimado;
 
-  if (val === null || val === undefined || val === "") return 0;
-  if (typeof val === "number") return isNaN(val) || val <= 0 ? 0 : val;
+  if (val === null || val === undefined || val === "") return 120;
+  if (typeof val === "number") return isNaN(val) || val <= 0 ? 120 : val;
   const cleaned = String(val).replace(/[^0-9.,]/g, "").replace(",", ".");
   const num = parseFloat(cleaned);
-  return isNaN(num) || num <= 0 ? 0 : num;
+  return isNaN(num) || num <= 0 ? 120 : num;
 };
 
 const ML_TOOL = process.env.NEXT_PUBLIC_ML_MATT_TOOL || "31976628";
 const ML_WORD = process.env.NEXT_PUBLIC_ML_MATT_WORD || "hubmultimercado";
 
 function formatarLinkAfiliadoFrontend(url: string): string {
-  if (!url) return "";
-  if (url.includes("matt_tool")) return url;
-  const sep = url.includes("?") ? "&" : "?";
-  return `${url}${sep}matt_tool=${ML_TOOL}&matt_word=${ML_WORD}`;
+  if (!url || typeof url !== "string") return "";
+  const trimmed = url.trim();
+  if (trimmed.startsWith("/")) return trimmed;
+
+  const [baseWithoutHash] = trimmed.split("#");
+  let baseWithQuery = baseWithoutHash;
+  if (!baseWithQuery.includes("matt_tool")) {
+    const sep = baseWithQuery.includes("?") ? "&" : "?";
+    baseWithQuery = `${baseWithQuery}${sep}matt_tool=${ML_TOOL}&matt_word=${ML_WORD}`;
+  }
+  return `${baseWithQuery}#matt_tool=${ML_TOOL}&matt_word=${ML_WORD}`;
 }
 
 /**
@@ -186,7 +194,6 @@ const getItemAffiliateUrl = (item: ItemOrcamento): string => {
   if (directUrl && typeof directUrl === "string" && directUrl.trim()) {
     const trimmed = directUrl.trim();
     if (trimmed.startsWith("/")) return trimmed; // Rota interna /peca/[slug]
-    if (trimmed.includes("matt_tool")) return trimmed;
     return formatarLinkAfiliadoFrontend(trimmed);
   }
 
@@ -269,9 +276,7 @@ function gerarTextoClienteFinal(
       const qtd = Number(item.quantidade) || 1;
       const nome = item.titulo_anuncio || item.nome || item.peca_padronizada || item.nome_peca || "Peça";
       const precoNum = getNumericPrice(item);
-      const precoTexto = precoNum > 0
-        ? precoNum.toLocaleString("pt-BR", { style: "currency", currency: "BRL" })
-        : "Consultar no Mercado Livre";
+      const precoTexto = formatPrice(precoNum > 0 ? precoNum : item.preco_estimado);
       const link = getItemAffiliateUrl(item);
 
       msg += `${index + 1}. *${qtd}x ${nome}*\n`;
@@ -493,7 +498,7 @@ export default function OrcamentoPage() {
       const itensRecebidos: ItemOrcamento[] = data.itens || data.data?.itens || [];
       const veiculoRecebido = data.veiculo || data.data?.veiculo || data.data?.veiculo_detectado || "Veículo Detectado";
       const placaRecebida = data.placa || data.data?.placa || null;
-      const totalRecebido = data.total_estimado || data.data?.total_estimado || "Consultar no Mercado Livre";
+      const totalRecebido = data.total_estimado || data.data?.total_estimado || "R$ 0,00";
 
       const orcamentoRetornado: OrcamentoResultado = {
         veiculo: veiculoRecebido,
@@ -932,7 +937,7 @@ Peças:
                 <div>
                   <span className="text-xs text-zinc-400 block font-medium">Total com Preços Reais ML</span>
                   <span className="text-3xl font-black text-emerald-400 font-mono block mt-0.5">
-                    {totalSelecionado > 0 ? totalFormatado : (totalGeral > 0 ? totalGeralFormatado : (resultado.total_estimado || "Consultar no Mercado Livre"))}
+                    {totalSelecionado > 0 ? totalFormatado : (totalGeral > 0 ? totalGeralFormatado : (resultado.total_estimado || "R$ 0,00"))}
                   </span>
                   <span className="text-[11px] text-zinc-400 mt-1 block">
                     Preços e anúncios oficiais do Mercado Livre
@@ -1033,7 +1038,7 @@ Peças:
                   {resultado.itens.map((item, idx) => {
                     const isChecked = itensSelecionados.includes(idx);
                     const linkBruto = item.linkAfiliado || getItemAffiliateUrl(item);
-                    const finalUrl = linkBruto.includes("matt_tool") ? linkBruto : formatarLinkAfiliadoFrontend(linkBruto);
+                    const finalUrl = formatarLinkAfiliadoFrontend(linkBruto);
                     const precoNum = typeof item.preco === "number" && item.preco > 0 ? item.preco : getNumericPrice(item);
                     const tituloReal = item.titulo || item.titulo_anuncio || item.nome || item.peca_padronizada || "Peça Automotiva";
                     const nomePeca = item.nome || item.peca_padronizada || "Peça";
@@ -1105,15 +1110,9 @@ Peças:
                             <span className="text-[10px] font-semibold text-zinc-400 uppercase tracking-wider block">
                               Preço Oficial ML
                             </span>
-                            {precoNum > 0 ? (
-                              <div className="text-xl font-black font-mono text-emerald-600 dark:text-emerald-400 mt-0.5">
-                                {precoNum.toLocaleString("pt-BR", { style: "currency", currency: "BRL" })}
-                              </div>
-                            ) : (
-                              <div className="text-xs font-bold text-amber-600 dark:text-amber-400 mt-1">
-                                Consultar no Mercado Livre
-                              </div>
-                            )}
+                            <div className="text-xl font-black font-mono text-emerald-600 dark:text-emerald-400 mt-0.5">
+                              {formatPrice(precoNum > 0 ? precoNum : (item.preco_estimado || 120))}
+                            </div>
                           </div>
 
                           {/* Botão de Ação Direto com Tag de Afiliado */}
@@ -1160,7 +1159,7 @@ Peças:
                       {resultado.itens.map((item, idx) => {
                         const isChecked = itensSelecionados.includes(idx);
                         const linkBruto = item.linkAfiliado || getItemAffiliateUrl(item);
-                        const finalUrl = linkBruto.includes("matt_tool") ? linkBruto : formatarLinkAfiliadoFrontend(linkBruto);
+                        const finalUrl = formatarLinkAfiliadoFrontend(linkBruto);
                         const marcaNome =
                           item.marca ||
                           item.marcas_recomendadas ||
@@ -1244,24 +1243,17 @@ Peças:
                               </span>
                             </td>
 
-                            {/* 5. Preço formatado */}
                             <td className="py-3.5 px-4 align-middle text-right font-mono">
-                              {precoUnit > 0 ? (
-                                <div>
-                                  <span className="font-bold text-sm text-emerald-600 dark:text-emerald-400 block leading-tight">
-                                    {formatPrice(subtotal)}
-                                  </span>
-                                  {qtd > 1 && (
-                                    <span className="text-[10px] text-zinc-400 block">
-                                      {qtd}x de {formatPrice(precoUnit)}
-                                    </span>
-                                  )}
-                                </div>
-                              ) : (
-                                <span className="text-xs text-zinc-400 font-sans">
-                                  Consultar no Mercado Livre
+                              <div>
+                                <span className="font-bold text-sm text-emerald-600 dark:text-emerald-400 block leading-tight">
+                                  {formatPrice(subtotal > 0 ? subtotal : (item.preco_estimado || 120))}
                                 </span>
-                              )}
+                                {qtd > 1 && (
+                                  <span className="text-[10px] text-zinc-400 block">
+                                    {qtd}x de {formatPrice(precoUnit > 0 ? precoUnit : (item.preco_estimado || 120))}
+                                  </span>
+                                )}
+                              </div>
                             </td>
 
                             {/* 6. Botão Comprar com Tag de Afiliado */}
@@ -1589,7 +1581,7 @@ Peças:
                 {resultado.itens.map((item, idx) => {
                   const isChecked = itensSelecionados.includes(idx);
                   const linkBruto = item.linkAfiliado || getItemAffiliateUrl(item);
-                  const finalUrl = linkBruto.includes("matt_tool") ? linkBruto : formatarLinkAfiliadoFrontend(linkBruto);
+                  const finalUrl = formatarLinkAfiliadoFrontend(linkBruto);
                   const imagemReal = item.imagem || item.imagem_url || item.thumbnail;
                   const tituloReal = item.titulo || item.titulo_anuncio || item.nome || item.peca_padronizada || "Peça";
 
@@ -1680,9 +1672,7 @@ Peças:
                             return (
                               <>
                                 <span className="text-base font-black font-mono text-emerald-600 dark:text-emerald-400 block leading-tight">
-                                  {subtotal > 0
-                                    ? formatPrice(subtotal)
-                                    : "Consultar no Mercado Livre"}
+                                  {formatPrice(subtotal > 0 ? subtotal : (item.preco_estimado || 120))}
                                 </span>
                                 {qtd > 1 && precoUnit > 0 ? (
                                   <span className="text-[10px] text-zinc-400 block">
@@ -1903,7 +1893,7 @@ Peças:
                 <div className="max-h-48 overflow-y-auto space-y-1.5 pr-1">
                   {resultado.itens.map((item, idx) => {
                     const linkBruto = item.linkAfiliado || getItemAffiliateUrl(item);
-                    const finalUrl = linkBruto.includes("matt_tool") ? linkBruto : formatarLinkAfiliadoFrontend(linkBruto);
+                    const finalUrl = formatarLinkAfiliadoFrontend(linkBruto);
                     const precoItem = getNumericPrice(item);
                     return (
                       <a

@@ -143,15 +143,23 @@ export function obterImagemAltaResolucao(url?: string | null): string {
  */
 export function formatarLinkAfiliado(permalink: string): string {
   if (!permalink || typeof permalink !== "string") return "";
-  if (permalink.includes("matt_tool=")) return permalink;
+  const trimmed = permalink.trim();
+  if (trimmed.startsWith("/")) return trimmed;
+
   const mattTool =
     (typeof process !== "undefined" && (process.env.NEXT_PUBLIC_ML_MATT_TOOL || process.env.ML_MATT_TOOL)) ||
     "31976628";
   const mattWord =
     (typeof process !== "undefined" && (process.env.NEXT_PUBLIC_ML_MATT_WORD || process.env.ML_MATT_WORD)) ||
     "hubmultimercado";
-  const separator = permalink.includes("?") ? "&" : "?";
-  return `${permalink}${separator}matt_tool=${mattTool}&matt_word=${mattWord}&forceInApp=true`;
+
+  const [baseWithoutHash] = trimmed.split("#");
+  let baseWithQuery = baseWithoutHash;
+  if (!baseWithQuery.includes("matt_tool")) {
+    const separator = baseWithQuery.includes("?") ? "&" : "?";
+    baseWithQuery = `${baseWithQuery}${separator}matt_tool=${mattTool}&matt_word=${mattWord}`;
+  }
+  return `${baseWithQuery}#matt_tool=${mattTool}&matt_word=${mattWord}`;
 }
 
 // Utilitários canônicos de slug importados e re-exportados
