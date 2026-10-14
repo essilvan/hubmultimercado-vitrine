@@ -19,6 +19,11 @@ function formatarLinkAfiliado(url: string): string {
   const trimmed = url.trim();
   if (trimmed.startsWith("/")) return trimmed;
 
+  // NUNCA permita links no formato /p/MLB... que geram "Produto Indisponível"
+  if (trimmed.includes("/p/MLB") || trimmed.includes("mercadolivre.com.br/p/")) {
+    return "";
+  }
+
   const [baseWithoutHash] = trimmed.split("#");
   let baseWithQuery = baseWithoutHash;
   if (!baseWithQuery.includes("matt_tool")) {
@@ -364,26 +369,227 @@ function extrairOrcamentoLocalmente(textoBruto: string): {
 }
 
 // ============================================================================
-// 3. CONSULTA AO VIVO NA API DO MERCADO LIVRE (CASCATA EM 3 TENTATIVAS)
+// 3. CONSULTA DE ANÚNCIOS 100% ATIVOS NO MERCADO LIVRE (VALIDAÇÃO DUPLA PEÇA + CARRO)
 // ============================================================================
 interface MLItemResultado {
-  titulo: string | null;
-  preco: number | null;
+  titulo: string;
+  preco: number;
   imagem: string | null;
   linkAfiliado: string;
   encontrado: boolean;
 }
 
+interface MLAnuncioExtraido {
+  titulo: string;
+  preco: number;
+  imagem: string | null;
+  link: string;
+}
+
 /**
- * Tentativa B: Fallback de extração direta de HTML da busca pública do Mercado Livre
+ * Normaliza strings para comparação (lowercase, sem acentos, sem caracteres especiais)
  */
-async function extrairHtmlAnuncioReal(
-  termoBusca: string,
+function normalizarTexto(str: string): string {
+  return (str || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .trim();
+}
+
+/**
+ * Identifica a palavra-raiz obrigatória da peça
+ * (ex: primeira palavra substantiva com mais de 3 letras, ignorando "kit", "jogo", "par", "troca",
+ * como "embreagem", "vela", "correia", "pastilha", "disco", "filtro", "amortecedor").
+ */
+function extrairPalavraRaizPeca(nomePeca: string): string {
+  const ignorar = new Set([
+    "kit", "kits", "jogo", "jogos", "par", "pares", "troca", "substituicao",
+    "revisao", "conjunto", "unid", "unidade", "unidades", "peca", "pecas",
+    "novo", "nova", "novos", "novas", "original", "genuino"
+  ]);
+
+  const normalizado = normalizarTexto(nomePeca);
+  const palavras = normalizado
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+
+  for (const pal of palavras) {
+    if (pal.length > 3 && !ignorar.has(pal)) {
+      // Normalização de plurais comuns em autopeças
+      if (pal.endsWith("es") && pal.length > 5) {
+        return pal.slice(0, -2); // amortecedores -> amortecedor
+      }
+      if (pal.endsWith("s") && !pal.endsWith("is") && pal.length > 4) {
+        return pal.slice(0, -1); // velas -> vela, pastilhas -> pastilha, correias -> correia
+      }
+      return pal;
+    }
+  }
+
+  return palavras[0] || normalizado;
+}
+
+/**
+ * VALIDAÇÃO DUPLA OBRIGATÓRIA:
+ * Só aceita um anúncio se o título dele (em lowercase, sem acentos) contiver AO MESMO TEMPO:
+ * a) A palavra-raiz da peça (ex: "embreagem")
+ * b) O modelo_chave do carro (ex: "gol")
+ */
+function validarAnuncio(titulo: string, palavraRaiz: string, modeloChave: string): boolean {
+  if (!titulo || !palavraRaiz) return false;
+  const titNorm = normalizarTexto(titulo);
+  const raizNorm = normalizarTexto(palavraRaiz);
+
+  // a) A palavra-raiz da peça deve estar no título
+  if (!titNorm.includes(raizNorm)) {
+    return false;
+  }
+
+  // b) O modelo_chave do carro deve estar no título
+  if (!modeloChave) return true;
+  const modNorm = normalizarTexto(modeloChave);
+
+  if (titNorm.includes(modNorm)) {
+    return true;
+  }
+
+  // Se o modelo_chave for composto (ex: "vw gol", "gol g5", "palio fire"), valida a palavra principal
+  const partes = modNorm
+    .split(/\s+/)
+    .filter((p) => p.length >= 2 && !["volkswagen", "chevrolet", "fiat", "ford", "renault", "toyota", "honda", "hyundai", "nissan", "jeep"].includes(p));
+
+  if (partes.length > 0) {
+    return partes.some((p) => titNorm.includes(p));
+  }
+
+  return false;
+}
+
+/**
+ * Extrai itens da listagem pública do Mercado Livre
+ * Extrai título, preço real, imagem e permalink MLB ativo.
+ * NUNCA aceita links de catálogo inativo (/p/MLB...)
+ */
+function extrairAnunciosDoHtml(html: string): MLAnuncioExtraido[] {
+  if (!html || html.includes("suspicious-traffic")) {
+    return [];
+  }
+
+  const anuncios: MLAnuncioExtraido[] = [];
+
+  // Divide o HTML pelos blocos de anúncio da listagem
+  const secoes = html.split(/(?:class="[^"]*(?:ui-search-layout__item|poly-card|ui-search-result)[^"]*")/i);
+  const blocos = secoes.length > 1 ? secoes.slice(1) : [html];
+
+  for (const secao of blocos) {
+    // 1. Extração do permalink ativo (deve ser MLB ativo direto, NUNCA /p/MLB...)
+    const linkMatch =
+      secao.match(/href="(https:\/\/[^"]*(?:produto\.mercadolivre\.com\.br\/MLB|mercadolivre\.com\.br\/MLB)[^"]*)"/i) ||
+      secao.match(/href="(\/[^"]*MLB-\d+[^"]*)"/i);
+
+    if (!linkMatch) continue;
+
+    let link = linkMatch[1];
+    if (link.startsWith("/")) {
+      link = `https://www.mercadolivre.com.br${link}`;
+    }
+
+    // REGRA RÍGIDA: Nunca gere nem aceite links de catálogo /p/MLB... que geram Produto Indisponível
+    if (link.includes("/p/MLB") || link.includes("mercadolivre.com.br/p/")) {
+      continue;
+    }
+
+    // 2. Extração do título
+    const titleMatch =
+      secao.match(/class="[^"]*poly-component__title"[^>]*><a[^>]*>([^<]+)<\/a>/i) ||
+      secao.match(/<h2[^>]*class="[^"]*ui-search-item__title[^"]*"[^>]*>([^<]+)<\/h2>/i) ||
+      secao.match(/class="[^"]*ui-search-item__title"[^>]*>([^<]+)<\/h2>/i) ||
+      secao.match(/<a[^>]+title="([^"]+)"[^>]+href="[^"]*MLB/i) ||
+      secao.match(/title="([^"]+)"/i);
+
+    let titulo = titleMatch ? titleMatch[1].trim() : "";
+    if (!titulo) {
+      const altMatch = secao.match(/alt="([^"]+)"/i);
+      if (altMatch) titulo = altMatch[1].trim();
+    }
+    if (!titulo) continue;
+
+    // 3. Extração do preço real
+    const fracMatch =
+      secao.match(/class="[^"]*(?:andes-money-amount__fraction|price-tag-fraction)"[^>]*>([0-9.]+)</i);
+    if (!fracMatch) continue;
+
+    const fracStr = fracMatch[1].replace(/\./g, "");
+    const centsMatch = secao.match(/class="[^"]*andes-money-amount__cents"[^>]*>([0-9]{2})</i);
+    const centsStr = centsMatch ? centsMatch[1] : "00";
+    const preco = parseFloat(`${fracStr}.${centsStr}`);
+    if (isNaN(preco) || preco <= 0) continue;
+
+    // 4. Extração da imagem
+    const imgMatch =
+      secao.match(/<img[^>]+src="([^">]+\.(?:webp|jpg|jpeg|png))"/i) ||
+      secao.match(/data-src="([^">]+\.(?:webp|jpg|jpeg|png))"/i);
+
+    let imagem: string | null = imgMatch ? imgMatch[1] : null;
+    if (imagem) {
+      imagem = imagem
+        .replace("-I.jpg", "-O.jpg")
+        .replace("-I.webp", "-O.webp")
+        .replace("-V.jpg", "-O.jpg")
+        .replace("-V.webp", "-O.webp")
+        .replace(/^http:\/\//i, "https://");
+    }
+
+    anuncios.push({
+      titulo,
+      preco,
+      imagem,
+      link,
+    });
+  }
+
+  return anuncios;
+}
+
+/**
+ * Busca de anúncios 100% ativos com validação dupla e garantia contra 'Produto Indisponível'
+ */
+async function buscarAnuncioAtivoMercadoLivre(
+  termoBuscaOriginal: string,
+  nomePeca: string,
+  veiculo: string,
   modeloChave: string,
-  signal?: AbortSignal
-): Promise<MLItemResultado | null> {
+  tokenOrSignal?: string | null | AbortSignal,
+  maybeSignal?: AbortSignal
+): Promise<MLItemResultado> {
+  const signal = tokenOrSignal instanceof AbortSignal ? tokenOrSignal : maybeSignal;
+  const palavraRaiz = extrairPalavraRaizPeca(nomePeca);
+  const modLower = (modeloChave || "").toLowerCase().trim();
+  const veiculoLimpo = (veiculo || "").trim();
+
+  // Link direto e garantido da busca filtrada (zero produto indisponível)
+  const linkBuscaFiltrada = `https://lista.mercadolivre.com.br/${encodeURIComponent(
+    `${nomePeca} ${veiculoLimpo}`.trim()
+  )}?matt_tool=${ML_TOOL}&matt_word=${ML_WORD}#matt_tool=${ML_TOOL}&matt_word=${ML_WORD}`;
+  const precoEstimado = estimarPrecoPeca(nomePeca);
+  const tituloGarantido = `${nomePeca} - ${veiculoLimpo || "Compatível"}`;
+
+  // Termo de busca direto para a página de listagem
+  let termoBusca = termoBuscaOriginal.trim();
+  const termoNorm = normalizarTexto(termoBusca);
+  const raizNorm = normalizarTexto(palavraRaiz);
+  const modNorm = normalizarTexto(modLower);
+
+  if (!termoNorm || !termoNorm.includes(raizNorm) || (modNorm && !termoNorm.includes(modNorm))) {
+    termoBusca = `${palavraRaiz} ${modLower}`.trim();
+  }
+
   try {
-    const url = `https://lista.mercadolivre.com.br/veiculos-acessorios-pecas/${encodeURIComponent(termoBusca)}`;
+    const url = `https://lista.mercadolivre.com.br/${encodeURIComponent(termoBusca)}`;
+    console.log(`[Busca ML Ativos] Consultando "${url}" (Raiz: "${palavraRaiz}", Carro: "${modLower}")...`);
+
     const res = await fetch(url, {
       headers: {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -394,217 +600,46 @@ async function extrairHtmlAnuncioReal(
       cache: "no-store",
     });
 
-    if (!res.ok) return null;
-    const html = await res.text();
+    if (res.ok) {
+      const html = await res.text();
+      const anuncios = extrairAnunciosDoHtml(html);
 
-    const precoFractionMatch =
-      html.match(/class="andes-money-amount__fraction">([0-9.]+)</i) ||
-      html.match(/class="price-tag-fraction">([0-9.]+)</i);
+      // VALIDAÇÃO DUPLA OBRIGATÓRIA:
+      // Só aceita o anúncio se contiver AO MESMO TEMPO a palavra-raiz da peça E o modelo_chave do carro
+      const anuncioValido = anuncios.find((a) => validarAnuncio(a.titulo, palavraRaiz, modLower));
 
-    if (!precoFractionMatch) return null;
-
-    const fractionStr = precoFractionMatch[1].replace(/\./g, "");
-    const centsMatch = html.match(/class="andes-money-amount__cents">([0-9]{2})</i);
-    const centsStr = centsMatch ? centsMatch[1] : "00";
-    const preco = parseFloat(`${fractionStr}.${centsStr}`);
-    if (isNaN(preco) || preco <= 0) return null;
-
-    const linkMatch =
-      html.match(/href="(https:\/\/[^"]*(?:produto\.mercadolivre\.com\.br\/MLB|mercadolivre\.com\.br\/p\/MLB)[^"]*)"/i) ||
-      html.match(/href="(\/[^"]*(?:MLB-\d+|p\/MLB\d+)[^"]*)"/i);
-
-    let linkProduto = linkMatch ? linkMatch[1] : url;
-    if (linkProduto.startsWith("/")) {
-      linkProduto = `https://www.mercadolivre.com.br${linkProduto}`;
-    }
-
-    const titleMatch =
-      html.match(/class="poly-component__title"[^>]*><a[^>]*>([^<]+)<\/a>/i) ||
-      html.match(/class="ui-search-item__title">([^<]+)<\/h2>/i) ||
-      html.match(/<h2 class="ui-search-item__title[^"]*">([^<]+)<\/h2>/i);
-
-    const titulo = titleMatch ? titleMatch[1].trim() : null;
-
-    const imgMatch =
-      html.match(/<img[^>]+src="([^">]+\.webp|[^">]+\.jpg)"[^>]+class="poly-component__picture"/i) ||
-      html.match(/data-src="(https:\/\/http2\.mlstatic\.com\/D_[^"]+)"/i) ||
-      html.match(/src="(https:\/\/http2\.mlstatic\.com\/D_[^"]+)"/i);
-
-    let imagem = imgMatch ? imgMatch[1] : null;
-    if (imagem) {
-      imagem = imagem
-        .replace("-I.jpg", "-O.jpg")
-        .replace("-I.webp", "-O.webp")
-        .replace("-V.jpg", "-O.jpg")
-        .replace("-V.webp", "-O.webp")
-        .replace(/^http:\/\//i, "https://");
-    }
-
-    return {
-      titulo,
-      preco,
-      imagem,
-      linkAfiliado: formatarLinkAfiliado(linkProduto),
-      encontrado: true,
-    };
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Busca Real em Cascata em 3 Tentativas:
- * - Tentativa A: Endpoint Oficial de Catálogo (products/search) com Bearer Token
- * - Tentativa B: Fallback Scraper Direto de Anúncio Real (HTML da busca pública)
- * - Tentativa C: Tabela de Preços Realista Garantida (nunca retorna nulo nem "Consultar no Mercado Livre")
- */
-async function buscarNoMercadoLivreCascata(
-  termoBuscaOriginal: string,
-  nomePeca: string,
-  veiculo: string,
-  modeloChave: string,
-  token: string | null,
-  signal?: AbortSignal
-): Promise<MLItemResultado> {
-  let termoBusca = termoBuscaOriginal.trim();
-  const modLower = (modeloChave || "").toLowerCase().trim();
-
-  if (modLower && !termoBusca.toLowerCase().includes(modLower)) {
-    termoBusca = `${nomePeca} ${modLower}`.trim();
-  }
-
-  const fallbackLink = formatarLinkAfiliado(
-    `https://lista.mercadolivre.com.br/veiculos-acessorios-pecas/${encodeURIComponent(termoBusca)}`
-  );
-  const precoTabela = estimarPrecoPeca(nomePeca);
-
-  // -------------------------------------------------------------
-  // TENTATIVA A: Endpoint Oficial de Catálogo (products/search) com Bearer Token
-  // -------------------------------------------------------------
-  if (token) {
-    try {
-      console.log(`[Busca ML - Tentativa A] Catálogo para "${termoBusca}"...`);
-      const catalogUrl = `https://api.mercadolibre.com/products/search?status=active&site_id=MLB&q=${encodeURIComponent(termoBusca)}&limit=5`;
-      const catRes = await fetch(catalogUrl, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          Accept: "application/json",
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        },
-        signal,
-        cache: "no-store",
-      });
-
-      console.log(`[Busca ML - Tentativa A] Status HTTP ${catRes.status}`);
-
-      if (catRes.ok) {
-        const catData = await catRes.json();
-        const results: any[] = Array.isArray(catData.results) ? catData.results : [];
-
-        if (results.length > 0) {
-          let itemEscolhido = modLower
-            ? results.find((r: any) => (r?.name || "").toLowerCase().includes(modLower))
-            : null;
-          if (!itemEscolhido) itemEscolhido = results[0];
-
-          if (itemEscolhido) {
-            const titulo = itemEscolhido.name || `${nomePeca} - ${veiculo || ""}`.trim();
-            let imagem: string | null = null;
-            if (Array.isArray(itemEscolhido.pictures) && itemEscolhido.pictures.length > 0) {
-              imagem = itemEscolhido.pictures[0].url || itemEscolhido.pictures[0].secure_url || null;
-            } else if (itemEscolhido.thumbnail) {
-              imagem = itemEscolhido.thumbnail;
-            }
-            if (imagem) {
-              imagem = imagem
-                .replace("-I.jpg", "-O.jpg")
-                .replace("-I.webp", "-O.webp")
-                .replace("-V.jpg", "-O.jpg")
-                .replace("-V.webp", "-O.webp")
-                .replace(/^http:\/\//i, "https://");
-            }
-
-            const directLink = `https://www.mercadolivre.com.br/p/${itemEscolhido.id}`;
-            const linkAfiliado = formatarLinkAfiliado(directLink);
-
-            let preco: number | null = null;
-            try {
-              const itemPriceUrl = `https://api.mercadolibre.com/products/${itemEscolhido.id}/items?limit=1`;
-              const itemPriceRes = await fetch(itemPriceUrl, {
-                headers: {
-                  Authorization: `Bearer ${token}`,
-                  Accept: "application/json",
-                  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                },
-                signal,
-                cache: "no-store",
-              });
-              if (itemPriceRes.ok) {
-                const itemPriceData = await itemPriceRes.json();
-                const firstResult = itemPriceData.results?.[0];
-                if (typeof firstResult?.price === "number" && firstResult.price > 0) {
-                  preco = Number(firstResult.price);
-                }
-              }
-            } catch (pErr) {
-              console.warn(`[Busca ML - Tentativa A] Falha ao obter preço de /items:`, pErr);
-            }
-
-            if (preco !== null && preco > 0) {
-              console.log(`[Busca ML - Tentativa A Sucesso] "${titulo}" | Preço: R$ ${preco}`);
-              return {
-                titulo,
-                preco,
-                imagem,
-                linkAfiliado,
-                encontrado: true,
-              };
-            }
-
-            // Se obteve produto mas não o preço, tenta Tentativa B ou usa estimativa realista
-            const fallbackB = await extrairHtmlAnuncioReal(termoBusca, modLower, signal);
-            const precoFinal = fallbackB?.preco ?? precoTabela;
-            return {
-              titulo,
-              preco: precoFinal,
-              imagem: imagem || fallbackB?.imagem || null,
-              linkAfiliado,
-              encontrado: true,
-            };
-          }
-        }
+      if (anuncioValido) {
+        console.log(`[Busca ML Validação Dupla Sucesso] "${anuncioValido.titulo}" | R$ ${anuncioValido.preco}`);
+        return {
+          titulo: anuncioValido.titulo,
+          preco: anuncioValido.preco,
+          imagem: anuncioValido.imagem,
+          linkAfiliado: formatarLinkAfiliado(anuncioValido.link),
+          encontrado: true,
+        };
+      } else {
+        console.warn(`[Busca ML] Nenhum anúncio passou na validação dupla para "${palavraRaiz}" + "${modLower}".`);
       }
-    } catch (errA) {
-      console.warn(`[Busca ML - Tentativa A Falhou] "${termoBusca}":`, errA);
+    } else {
+      console.warn(`[Busca ML] Resposta HTTP ${res.status} ao consultar listagem.`);
     }
+  } catch (err: any) {
+    console.warn(`[Busca ML] Bloqueio de IP ou exceção ao buscar "${termoBusca}":`, err?.message || err);
   }
 
-  // -------------------------------------------------------------
-  // TENTATIVA B: Scraper de Busca Direta na Web do Mercado Livre
-  // -------------------------------------------------------------
-  try {
-    console.log(`[Busca ML - Tentativa B] Scraping público para "${termoBusca}"...`);
-    const resultadoB = await extrairHtmlAnuncioReal(termoBusca, modLower, signal);
-    if (resultadoB) {
-      console.log(`[Busca ML - Tentativa B Sucesso] "${resultadoB.titulo}" | Preço: R$ ${resultadoB.preco}`);
-      return resultadoB;
-    }
-  } catch (errB) {
-    console.warn(`[Busca ML - Tentativa B Falhou] "${termoBusca}":`, errB);
-  }
-
-  // -------------------------------------------------------------
-  // TENTATIVA C: Tabela de Preços Realista Garantida
-  // -------------------------------------------------------------
-  console.log(`[Busca ML - Tentativa C] Preço de contingência realista para "${nomePeca}": R$ ${precoTabela}`);
+  // Se o IP da Vercel for bloqueado ou nenhum anúncio passar na validação dupla:
+  // Usa o link direto da busca filtrada de anúncios ativos (nunca produto inativo)
+  console.log(`[Busca ML Fallback Garantido] Usando busca ativa direta para "${tituloGarantido}": R$ ${precoEstimado}`);
   return {
-    titulo: `${nomePeca} - ${veiculo || "Compatível"}`,
-    preco: precoTabela,
+    titulo: tituloGarantido,
+    preco: precoEstimado,
     imagem: null,
-    linkAfiliado: fallbackLink,
+    linkAfiliado: linkBuscaFiltrada,
     encontrado: true,
   };
 }
+
+const buscarNoMercadoLivreCascata = buscarAnuncioAtivoMercadoLivre;
 
 
 // ============================================================================
@@ -764,13 +799,13 @@ export async function POST(request: NextRequest) {
     // 1. Obtenção do Bearer Token OAuth do Mercado Livre
     const token = await obterTokenMercadoLivre();
 
-    // 2. Consulta ao vivo na API do Mercado Livre para cada peça em cascata paralela com timeout
+    // 2. Consulta de anúncios ativos no Mercado Livre com validação dupla
     const resultadosBusca = await Promise.allSettled(
       pecasExtraidas.map(async (peca) => {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 7000);
         try {
-          const resultado = await buscarNoMercadoLivreCascata(
+          const resultado = await buscarAnuncioAtivoMercadoLivre(
             peca.termo_busca,
             peca.nome,
             veiculoDetectado,
@@ -782,9 +817,9 @@ export async function POST(request: NextRequest) {
           return resultado;
         } catch {
           clearTimeout(timeoutId);
-          const linkFallback = formatarLinkAfiliado(
-            `https://lista.mercadolivre.com.br/veiculos-acessorios-pecas/${encodeURIComponent(peca.termo_busca)}`
-          );
+          const linkFallback = `https://lista.mercadolivre.com.br/${encodeURIComponent(
+            `${peca.nome} ${veiculoDetectado}`.trim()
+          )}?matt_tool=${ML_TOOL}&matt_word=${ML_WORD}#matt_tool=${ML_TOOL}&matt_word=${ML_WORD}`;
           const precoFallback = estimarPrecoPeca(peca.nome);
           return {
             titulo: `${peca.nome} - ${veiculoDetectado}`,
@@ -797,7 +832,7 @@ export async function POST(request: NextRequest) {
       })
     );
 
-    // Mapeamento e estruturação de cada item garantindo preços reais/realistas
+    // Mapeamento e estruturação de cada item garantindo preços reais/realistas e links ativos
     const itensProcessados: ItemOrcamentoProcessado[] = pecasExtraidas.map((peca, idx) => {
       const resBusca = resultadosBusca[idx];
       const dadosItem = resBusca.status === "fulfilled" ? resBusca.value : null;
@@ -808,16 +843,27 @@ export async function POST(request: NextRequest) {
         : precoEstimado;
       const precoFormatado = precoNum.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
 
-      const fallbackLink = formatarLinkAfiliado(
-        `https://lista.mercadolivre.com.br/veiculos-acessorios-pecas/${encodeURIComponent(peca.termo_busca)}`
-      );
-      const linkFinal = formatarLinkAfiliado(dadosItem?.linkAfiliado || fallbackLink);
+      const linkBuscaGarantida = `https://lista.mercadolivre.com.br/${encodeURIComponent(
+        `${peca.nome} ${veiculoDetectado}`.trim()
+      )}?matt_tool=${ML_TOOL}&matt_word=${ML_WORD}#matt_tool=${ML_TOOL}&matt_word=${ML_WORD}`;
+
+      // Validação de link: NUNCA permite /p/MLB... de catálogo inativo
+      let linkFinal = linkBuscaGarantida;
+      if (
+        dadosItem?.linkAfiliado &&
+        !dadosItem.linkAfiliado.includes("/p/MLB") &&
+        !dadosItem.linkAfiliado.includes("mercadolivre.com.br/p/")
+      ) {
+        linkFinal = formatarLinkAfiliado(dadosItem.linkAfiliado) || linkBuscaGarantida;
+      }
+
+      const tituloFinal = dadosItem?.titulo || `${peca.nome} - ${veiculoDetectado}`;
 
       return {
         nome: peca.nome,
         termo_busca: peca.termo_busca,
-        titulo: dadosItem?.titulo || `${peca.nome} - ${veiculoDetectado}`,
-        titulo_anuncio: dadosItem?.titulo || `${peca.nome} - ${veiculoDetectado}`,
+        titulo: tituloFinal,
+        titulo_anuncio: tituloFinal,
         preco: precoNum,
         imagem: dadosItem?.imagem || null,
         imagem_url: dadosItem?.imagem || null,
@@ -852,7 +898,7 @@ export async function POST(request: NextRequest) {
       : "R$ 0,00";
 
     const linkKitCompleto = formatarLinkAfiliado(
-      `https://lista.mercadolivre.com.br/veiculos-acessorios-pecas/${encodeURIComponent(
+      `https://lista.mercadolivre.com.br/${encodeURIComponent(
         `${pecasExtraidas.map((x) => x.nome).join(" ")} ${veiculoDetectado}`.trim()
       )}`
     );
