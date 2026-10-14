@@ -157,11 +157,21 @@ const getNumericPrice = (item: ItemOrcamento | undefined | null): number => {
   return isNaN(num) || num <= 0 ? 0 : num;
 };
 
+const ML_TOOL = process.env.NEXT_PUBLIC_ML_MATT_TOOL || "31976628";
+const ML_WORD = process.env.NEXT_PUBLIC_ML_MATT_WORD || "hubmultimercado";
+
+function formatarLinkAfiliadoFrontend(url: string): string {
+  if (!url) return "";
+  if (url.includes("matt_tool")) return url;
+  const sep = url.includes("?") ? "&" : "?";
+  return `${url}${sep}matt_tool=${ML_TOOL}&matt_word=${ML_WORD}`;
+}
+
 /**
  * Retorna o link direto de afiliado do produto ou busca com tag de afiliado
  */
 const getItemAffiliateUrl = (item: ItemOrcamento): string => {
-  // a) Priorize sempre o link direto de afiliado retornado do produto
+  // a) Priorize estritamente o link direto de afiliado retornado do produto
   const directUrl =
     item.linkAfiliado ||
     item.link_afiliado ||
@@ -176,7 +186,8 @@ const getItemAffiliateUrl = (item: ItemOrcamento): string => {
   if (directUrl && typeof directUrl === "string" && directUrl.trim()) {
     const trimmed = directUrl.trim();
     if (trimmed.startsWith("/")) return trimmed; // Rota interna /peca/[slug]
-    return formatarLinkAfiliado(trimmed);
+    if (trimmed.includes("matt_tool")) return trimmed;
+    return formatarLinkAfiliadoFrontend(trimmed);
   }
 
   // b) Se o item tiver slug gravado no banco produtos_afiliados
@@ -195,8 +206,8 @@ const getItemAffiliateUrl = (item: ItemOrcamento): string => {
     item.nome ||
     "";
 
-  const searchUrl = `https://lista.mercadolivre.com.br/${encodeURIComponent(termo)}_ItemCondition_2230284`;
-  return formatarLinkAfiliado(searchUrl);
+  const searchUrl = `https://lista.mercadolivre.com.br/veiculos-acessorios-pecas/${encodeURIComponent(termo)}`;
+  return formatarLinkAfiliadoFrontend(searchUrl);
 };
 
 /**
@@ -595,8 +606,10 @@ export default function OrcamentoPage() {
     const termoKit = `${veiculoTexto} kit ${itensEscolhidos
       .map((i) => i.nome || i.peca_padronizada || i.nome_peca)
       .join(" ")}`.replace(/\s+/g, " ").trim();
-    const urlKit = formatarLinkAfiliado(`https://lista.mercadolivre.com.br/${encodeURIComponent(termoKit)}`);
-    window.open(urlKit, "_blank");
+    const urlKit = formatarLinkAfiliadoFrontend(
+      `https://lista.mercadolivre.com.br/veiculos-acessorios-pecas/${encodeURIComponent(termoKit)}`
+    );
+    window.open(urlKit, "_blank", "noopener,noreferrer");
   };
 
   // BOTÃO 4: "ABRIR TODAS EM ABAS SEPARADAS"
@@ -609,7 +622,8 @@ export default function OrcamentoPage() {
     );
 
     itensParaAbrir.forEach((item, index) => {
-      const urlFinal = getItemAffiliateUrl(item);
+      const linkBruto = item.linkAfiliado || getItemAffiliateUrl(item);
+      const urlFinal = linkBruto.includes("matt_tool") ? linkBruto : formatarLinkAfiliadoFrontend(linkBruto);
 
       if (urlFinal) {
         setTimeout(() => {
@@ -1018,7 +1032,8 @@ Peças:
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5 p-6 bg-zinc-50/40 dark:bg-zinc-950/30">
                   {resultado.itens.map((item, idx) => {
                     const isChecked = itensSelecionados.includes(idx);
-                    const finalUrl = item.linkAfiliado || item.link_afiliado || getItemAffiliateUrl(item);
+                    const linkBruto = item.linkAfiliado || getItemAffiliateUrl(item);
+                    const finalUrl = linkBruto.includes("matt_tool") ? linkBruto : formatarLinkAfiliadoFrontend(linkBruto);
                     const precoNum = typeof item.preco === "number" && item.preco > 0 ? item.preco : getNumericPrice(item);
                     const tituloReal = item.titulo || item.titulo_anuncio || item.nome || item.peca_padronizada || "Peça Automotiva";
                     const nomePeca = item.nome || item.peca_padronizada || "Peça";
@@ -1144,7 +1159,8 @@ Peças:
                     <tbody className="divide-y divide-zinc-200 dark:divide-zinc-800 text-sm">
                       {resultado.itens.map((item, idx) => {
                         const isChecked = itensSelecionados.includes(idx);
-                        const finalUrl = item.linkAfiliado || item.link_afiliado || getItemAffiliateUrl(item);
+                        const linkBruto = item.linkAfiliado || getItemAffiliateUrl(item);
+                        const finalUrl = linkBruto.includes("matt_tool") ? linkBruto : formatarLinkAfiliadoFrontend(linkBruto);
                         const marcaNome =
                           item.marca ||
                           item.marcas_recomendadas ||
@@ -1572,7 +1588,8 @@ Peças:
               <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-3">
                 {resultado.itens.map((item, idx) => {
                   const isChecked = itensSelecionados.includes(idx);
-                  const finalUrl = item.linkAfiliado || item.link_afiliado || getItemAffiliateUrl(item);
+                  const linkBruto = item.linkAfiliado || getItemAffiliateUrl(item);
+                  const finalUrl = linkBruto.includes("matt_tool") ? linkBruto : formatarLinkAfiliadoFrontend(linkBruto);
                   const imagemReal = item.imagem || item.imagem_url || item.thumbnail;
                   const tituloReal = item.titulo || item.titulo_anuncio || item.nome || item.peca_padronizada || "Peça";
 
@@ -1885,7 +1902,8 @@ Peças:
                 </span>
                 <div className="max-h-48 overflow-y-auto space-y-1.5 pr-1">
                   {resultado.itens.map((item, idx) => {
-                    const finalUrl = getItemAffiliateUrl(item);
+                    const linkBruto = item.linkAfiliado || getItemAffiliateUrl(item);
+                    const finalUrl = linkBruto.includes("matt_tool") ? linkBruto : formatarLinkAfiliadoFrontend(linkBruto);
                     const precoItem = getNumericPrice(item);
                     return (
                       <a

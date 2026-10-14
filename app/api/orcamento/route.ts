@@ -6,8 +6,22 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 // ============================================================================
-// 1. AUTENTICAÇÃO MERCADO LIVRE (Server-to-Server com cache em memória)
+// 1. CONFIGURAÇÃO E AUTENTICAÇÃO MERCADO LIVRE
 // ============================================================================
+const ML_TOOL = process.env.ML_MATT_TOOL || '31976628';
+const ML_WORD = process.env.ML_MATT_WORD || 'hubmultimercado';
+
+const CLIENT_ID = process.env.ML_CLIENT_ID || '2324571286119138';
+const CLIENT_SECRET = process.env.ML_CLIENT_SECRET || 'yjbLRYJenI5VI8r7bH4JamoeKNTMyw4W';
+
+function formatarLinkAfiliado(url: string): string {
+  if (!url) return '';
+  const sep = url.includes('?') ? '&' : '?';
+  // Garante que não duplique caso já exista
+  if (url.includes('matt_tool')) return url;
+  return `${url}${sep}matt_tool=${ML_TOOL}&matt_word=${ML_WORD}`;
+}
+
 interface MLTokenCache {
   token: string;
   expiresAt: number;
@@ -21,27 +35,23 @@ async function obterTokenMercadoLivre(): Promise<string | null> {
     return mlTokenCache.token;
   }
 
-  const clientId = process.env.ML_CLIENT_ID;
-  const clientSecret = process.env.ML_CLIENT_SECRET;
-
-  if (!clientId || !clientSecret) {
-    console.warn("[ML OAuth] ML_CLIENT_ID ou ML_CLIENT_SECRET não configurados no ambiente.");
-    return null;
-  }
-
   try {
+    console.log("[ML OAuth] Solicitando novo Bearer Token OAuth ao Mercado Livre...");
     const params = new URLSearchParams();
     params.append("grant_type", "client_credentials");
-    params.append("client_id", clientId);
-    params.append("client_secret", clientSecret);
+    params.append("client_id", CLIENT_ID);
+    params.append("client_secret", CLIENT_SECRET);
 
     const res = await fetch("https://api.mercadolibre.com/oauth/token", {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
+        Accept: "application/json",
       },
       body: params.toString(),
     });
+
+    console.log(`[ML OAuth] Resposta HTTP ${res.status}`);
 
     if (!res.ok) {
       const errText = await res.text();
@@ -56,6 +66,7 @@ async function obterTokenMercadoLivre(): Promise<string | null> {
         token: data.access_token,
         expiresAt: Date.now() + expiresInSeconds * 1000,
       };
+      console.log(`[ML OAuth] Token obtido com sucesso! Válido por ${expiresInSeconds}s`);
       return data.access_token;
     }
   } catch (err) {
@@ -204,12 +215,16 @@ async function buscarItemMercadoLivre(
     headers["Authorization"] = `Bearer ${token}`;
   }
 
+  console.log(`[Busca ML] Consultando: "${termoBusca}" (Token presente: ${Boolean(token)})`);
+
   try {
     const res = await fetch(endpoint, {
       headers,
       signal,
       cache: "no-store",
     });
+
+    console.log(`[Busca ML] Status HTTP ${res.status} para busca "${termoBusca}"`);
 
     if (res.ok) {
       const data = await res.json();
@@ -242,20 +257,17 @@ async function buscarItemMercadoLivre(
               .replace("-I.jpg", "-O.jpg")
               .replace("-I.webp", "-O.webp")
               .replace("-V.jpg", "-O.jpg")
+              .replace("-V.webp", "-O.webp")
               .replace(/^http:\/\//i, "https://");
           }
 
-          // Aplica tags oficiais no permalink retornado
-          const mattTool = process.env.ML_MATT_TOOL || process.env.NEXT_PUBLIC_ML_MATT_TOOL || "31976628";
-          const mattWord = process.env.ML_MATT_WORD || process.env.NEXT_PUBLIC_ML_MATT_WORD || "hubmultimercado";
+          const linkAfiliado = itemCompativel.permalink
+            ? formatarLinkAfiliado(itemCompativel.permalink)
+            : formatarLinkAfiliado(
+                `https://lista.mercadolivre.com.br/veiculos-acessorios-pecas/${encodeURIComponent(termoBusca)}`
+              );
 
-          let linkAfiliado: string;
-          if (itemCompativel.permalink) {
-            const sep = itemCompativel.permalink.includes("?") ? "&" : "?";
-            linkAfiliado = `${itemCompativel.permalink}${sep}matt_tool=${mattTool}&matt_word=${mattWord}`;
-          } else {
-            linkAfiliado = `https://lista.mercadolivre.com.br/${encodeURIComponent(termoBusca)}_ItemCondition_2230284?matt_tool=${mattTool}&matt_word=${mattWord}`;
-          }
+          console.log(`[Busca ML] Sucesso: "${titulo}" | Preço: ${preco} | Link: ${linkAfiliado}`);
 
           return {
             titulo,
@@ -265,22 +277,27 @@ async function buscarItemMercadoLivre(
             encontrado: true,
           };
         }
+      } else {
+        console.warn(`[Busca ML] 0 resultados retornados para "${termoBusca}"`);
       }
+    } else {
+      const errText = await res.text().catch(() => "");
+      console.error(`[Busca ML] Erro HTTP ${res.status} ao consultar "${termoBusca}":`, errText.slice(0, 150));
     }
   } catch (err) {
-    console.error(`[Busca ML] Erro ao buscar "${termoBusca}":`, err);
+    console.error(`[Busca ML] Exceção ao buscar "${termoBusca}":`, err);
   }
 
-  // Fallback quando a API não retorna resultados
-  const mattTool = process.env.ML_MATT_TOOL || process.env.NEXT_PUBLIC_ML_MATT_TOOL || "31976628";
-  const mattWord = process.env.ML_MATT_WORD || process.env.NEXT_PUBLIC_ML_MATT_WORD || "hubmultimercado";
-  const linkFallback = `https://lista.mercadolivre.com.br/${encodeURIComponent(termoBusca)}_ItemCondition_2230284?matt_tool=${mattTool}&matt_word=${mattWord}`;
+  // Fallback obrigatório com link de busca na categoria MLB1747 e tag de afiliado
+  const linkBusca = formatarLinkAfiliado(
+    `https://lista.mercadolivre.com.br/veiculos-acessorios-pecas/${encodeURIComponent(termoBusca)}`
+  );
 
   return {
     titulo: null,
     preco: null,
     imagem: null,
-    linkAfiliado: linkFallback,
+    linkAfiliado: linkBusca,
     encontrado: false,
   };
 }
@@ -420,14 +437,11 @@ export async function POST(request: NextRequest) {
     // 1. Obtenção do Bearer Token OAuth do Mercado Livre
     const token = await obterTokenMercadoLivre();
 
-    // 3. Consulta ao vivo na API do Mercado Livre para cada peça em paralelo com timeout de 3.5s
-    const mattTool = process.env.ML_MATT_TOOL || process.env.NEXT_PUBLIC_ML_MATT_TOOL || "31976628";
-    const mattWord = process.env.ML_MATT_WORD || process.env.NEXT_PUBLIC_ML_MATT_WORD || "hubmultimercado";
-
+    // 3. Consulta ao vivo na API do Mercado Livre para cada peça em paralelo com timeout de 5.0s
     const resultadosBusca = await Promise.allSettled(
       pecasExtraidas.map(async (peca) => {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 3500);
+        const timeoutId = setTimeout(() => controller.abort(), 5000);
         try {
           const resultado = await buscarItemMercadoLivre(
             peca.termo_busca,
@@ -440,7 +454,9 @@ export async function POST(request: NextRequest) {
           return resultado;
         } catch {
           clearTimeout(timeoutId);
-          const linkFallback = `https://lista.mercadolivre.com.br/${encodeURIComponent(peca.termo_busca)}_ItemCondition_2230284?matt_tool=${mattTool}&matt_word=${mattWord}`;
+          const linkFallback = formatarLinkAfiliado(
+            `https://lista.mercadolivre.com.br/veiculos-acessorios-pecas/${encodeURIComponent(peca.termo_busca)}`
+          );
           return {
             titulo: null,
             preco: null,
@@ -462,8 +478,10 @@ export async function POST(request: NextRequest) {
         ? precoNum.toLocaleString("pt-BR", { style: "currency", currency: "BRL" })
         : "Consultar no Mercado Livre";
 
-      const fallbackLink = `https://lista.mercadolivre.com.br/${encodeURIComponent(peca.termo_busca)}_ItemCondition_2230284?matt_tool=${mattTool}&matt_word=${mattWord}`;
-      const linkFinal = dadosItem?.linkAfiliado || fallbackLink;
+      const fallbackLink = formatarLinkAfiliado(
+        `https://lista.mercadolivre.com.br/veiculos-acessorios-pecas/${encodeURIComponent(peca.termo_busca)}`
+      );
+      const linkFinal = formatarLinkAfiliado(dadosItem?.linkAfiliado || fallbackLink);
 
       return {
         nome: peca.nome,
