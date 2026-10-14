@@ -1427,10 +1427,11 @@ export function construirLinkContingenciaML(termoBusca: string): string {
   const slug = (termoBusca || "")
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^a-zA-Z0-9\s-]/g, " ")
+    .toLowerCase()
     .trim()
-    .replace(/\s+/g, "-");
-  const rawUrl = `https://lista.mercadolivre.com.br/${encodeURIComponent(slug)}_ItemCondition_2230284_OrderId_PRICE_ASC`;
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  const rawUrl = `https://lista.mercadolivre.com.br/${slug}_OrderId_PRICE_NoIndex_True`;
   return formatarLinkAfiliado(rawUrl);
 }
 

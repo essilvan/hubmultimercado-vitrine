@@ -169,12 +169,24 @@ const getItemAffiliateUrl = (item: ItemOrcamento): string => {
   if (directUrl && typeof directUrl === "string" && directUrl.trim()) {
     const trimmed = directUrl.trim();
     if (trimmed.startsWith("/")) return trimmed;
+    // Se o backend já enviou com matt_tool, preserva o link diretamente
+    if (trimmed.includes("matt_tool=")) return trimmed;
     return formatarLinkAfiliadoFrontend(trimmed);
   }
 
-  const codMarca = `${item.codigo || ""} ${item.marca || ""}`.trim() || item.nome || "";
-  const searchUrl = `https://lista.mercadolivre.com.br/${encodeURIComponent(codMarca)}`;
-  return formatarLinkAfiliadoFrontend(searchUrl);
+  // Fallback que não perde o código de afiliado (sem espaços para evitar redirecionamento 301 do ML)
+  const cod = item.codigo && item.codigo !== "S/ CÓDIGO" ? item.codigo : "";
+  const marca = item.marca && item.marca !== "Original" ? item.marca : "";
+  const termo = `${marca ? `${marca} ` : ""}${cod || item.nome || ""}`.trim();
+  const slugLimpo = termo
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+  return `https://lista.mercadolivre.com.br/${slugLimpo}_OrderId_PRICE_NoIndex_True?matt_tool=${ML_TOOL}&matt_word=${ML_WORD}#matt_tool=${ML_TOOL}&matt_word=${ML_WORD}`;
 };
 
 function gerarTextoClienteFinal(
