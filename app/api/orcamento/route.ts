@@ -66,8 +66,15 @@ async function obterTokenMercadoLivre(): Promise<string | null> {
 }
 
 // ============================================================================
-// 2. EXTRAÇÃO COM GEMINI (gemini-3.8-flash)
+// 2. EXTRAÇÃO COM GEMINI (com fallback de modelos resilientes)
 // ============================================================================
+const MODEL_CANDIDATES = [
+  'gemini-1.5-flash',
+  'gemini-1.5-flash-latest',
+  'gemini-1.5-pro',
+  'gemini-3.8-flash'
+];
+
 const SYSTEM_INSTRUCTION = `Você é um extrator técnico automotivo especializado do PeçasFinder.
 Sua missão é extrair estritamente as informações mecânicas do orçamento (imagem ou texto) com foco cirúrgico no cabeçalho do veículo e na lista de peças de reposição.
 
@@ -344,53 +351,64 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Instanciação do modelo rápido gemini-3.8-flash
-    const model = genAI.getGenerativeModel({
-      model: "gemini-3.8-flash",
-      systemInstruction: SYSTEM_INSTRUCTION,
-      generationConfig: {
-        responseMimeType: "application/json",
-        responseSchema: RESPONSE_SCHEMA,
-        temperature: 0.1,
-      },
-    });
-
-    const result = await model.generateContent(promptParts);
-    const response = await result.response;
-    const textOutput = response.text();
-
-    if (!textOutput || !textOutput.trim()) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: "O modelo de IA não retornou conteúdo estruturado do orçamento.",
-        },
-        { status: 500 }
-      );
-    }
-
+    // Tentativa sequencial de extração com fallback de modelos resilientes (MODEL_CANDIDATES)
     let parsedData: {
       veiculo: string;
       modelo_chave: string;
       placa?: string | null;
       pecas: Array<{ nome: string; termo_busca: string }>;
-    };
+    } | null = null;
 
-    try {
-      const cleanJson = textOutput
-        .trim()
-        .replace(/^```json\s*/i, "")
-        .replace(/^```\s*/i, "")
-        .replace(/\s*```$/i, "");
-      parsedData = JSON.parse(cleanJson);
-    } catch {
-      console.error("[ERRO PARSER JSON GEMINI] Conteúdo recebido:", textOutput);
+    let lastGeminiError: unknown = null;
+
+    for (const candidateModel of MODEL_CANDIDATES) {
+      try {
+        const model = genAI.getGenerativeModel({
+          model: candidateModel,
+          systemInstruction: SYSTEM_INSTRUCTION,
+          generationConfig: {
+            responseMimeType: "application/json",
+            responseSchema: RESPONSE_SCHEMA,
+            temperature: 0.1,
+          },
+        });
+
+        const result = await model.generateContent(promptParts);
+        const response = await result.response;
+        const textOutput = response.text();
+
+        if (!textOutput || !textOutput.trim()) {
+          console.warn(`[Gemini Fallback] Modelo ${candidateModel} retornou resposta vazia. Tentando próximo modelo...`);
+          continue;
+        }
+
+        const cleanJson = textOutput
+          .trim()
+          .replace(/^```json\s*/i, "")
+          .replace(/^```\s*/i, "")
+          .replace(/\s*```$/i, "");
+
+        parsedData = JSON.parse(cleanJson);
+        console.log(`[Gemini] Extração realizada com sucesso com o modelo: ${candidateModel}`);
+        break;
+      } catch (err: any) {
+        lastGeminiError = err;
+        const status = err?.status || err?.statusCode || (err?.message?.match(/\b(503|429|404|500)\b/)?.[0]);
+        console.warn(
+          `[Gemini Fallback] Modelo ${candidateModel} falhou${status ? ` (${status})` : ""}: ${err?.message || err}. Tentando próximo modelo...`
+        );
+      }
+    }
+
+    if (!parsedData) {
+      const errorMsg = lastGeminiError instanceof Error ? lastGeminiError.message : "Nenhum modelo candidato respondeu com sucesso.";
+      console.error("[ERRO GEMINI] Todos os modelos candidatos falharam na extração:", errorMsg);
       return NextResponse.json(
         {
           success: false,
-          error: `Payload retornado pelo Gemini é um JSON inválido: ${textOutput.slice(0, 200)}`,
+          error: `Falha ao processar orçamento com a IA (modelos sobrecarregados ou indisponíveis): ${errorMsg}`,
         },
-        { status: 500 }
+        { status: 503 }
       );
     }
 
