@@ -143,7 +143,7 @@ export function obterImagemAltaResolucao(url?: string | null): string {
  */
 export function formatarLinkAfiliado(permalink: string): string {
   if (!permalink || typeof permalink !== "string") return "";
-  const trimmed = permalink.trim();
+  let trimmed = permalink.trim();
   if (trimmed.startsWith("/")) return trimmed;
 
   const mattTool =
@@ -153,13 +153,31 @@ export function formatarLinkAfiliado(permalink: string): string {
     (typeof process !== "undefined" && (process.env.NEXT_PUBLIC_ML_MATT_WORD || process.env.ML_MATT_WORD)) ||
     "hubmultimercado";
 
-  const [baseWithoutHash] = trimmed.split("#");
-  let baseWithQuery = baseWithoutHash;
-  if (!baseWithQuery.includes("matt_tool")) {
-    const separator = baseWithQuery.includes("?") ? "&" : "?";
-    baseWithQuery = `${baseWithQuery}${separator}matt_tool=${mattTool}&matt_word=${mattWord}`;
+  // Se for click1, verifica se tem parâmetro ?url= contendo o link do produto direto
+  if (trimmed.includes("click1.mercadolivre.com.br")) {
+    try {
+      const parsed = new URL(trimmed);
+      const innerUrl = parsed.searchParams.get("url");
+      if (innerUrl) {
+        trimmed = decodeURIComponent(innerUrl);
+      }
+    } catch {}
   }
-  return `${baseWithQuery}#matt_tool=${mattTool}&matt_word=${mattWord}`;
+
+  // Se já contém matt_tool e matt_word, retorna diretamente
+  if (trimmed.includes("matt_tool=") && trimmed.includes("matt_word=")) {
+    return trimmed;
+  }
+
+  // Se ainda for click1 (sem innerUrl), anexa mantendo os parâmetros
+  if (trimmed.includes("click1.mercadolivre.com.br")) {
+    const [baseWithoutHash] = trimmed.split("#");
+    const sep = baseWithoutHash.includes("?") ? "&" : "?";
+    return `${baseWithoutHash}${sep}matt_tool=${mattTool}&matt_word=${mattWord}#matt_tool=${mattTool}&matt_word=${mattWord}`;
+  }
+
+  const cleanBase = trimmed.split("?")[0].split("#")[0];
+  return `${cleanBase}?matt_tool=${mattTool}&matt_word=${mattWord}#matt_tool=${mattTool}&matt_word=${mattWord}`;
 }
 
 // Utilitários canônicos de slug importados e re-exportados
@@ -1166,22 +1184,6 @@ async function buscarNoSupabaseCompativel(termoBusca: string, veiculo?: string |
   return null;
 }
 
-function deduzirPrecoReferenciaMercado(termo: string, veiculo?: string | null) {
-  const t = termo.toLowerCase();
-  const v = veiculo ? ` ${veiculo}` : "";
-  if (/amortecedor/i.test(t)) return { preco: 389.90, marca: "Nakata / Cofap", titulo: `Amortecedor Dianteiro${v}` };
-  if (/pastilha/i.test(t)) return { preco: 129.90, marca: "Cobreq / Fras-le", titulo: `Jogo de Pastilhas de Freio${v}` };
-  if (/disco/i.test(t)) return { preco: 198.50, marca: "Fremax / Hipper Freios", titulo: `Par Disco de Freio Ventilado${v}` };
-  if (/embreagem/i.test(t)) return { preco: 489.00, marca: "LuK / Sachs", titulo: `Kit de Embreagem${v}` };
-  if (/correia|tensor/i.test(t)) return { preco: 169.90, marca: "Contitech / Gates", titulo: `Kit Correia Dentada e Tensor${v}` };
-  if (/filtro/i.test(t)) return { preco: 48.90, marca: "Mann-Filter / Tecfil", titulo: `Filtro Automotivo${v}` };
-  if (/vela/i.test(t)) return { preco: 98.00, marca: "NGK", titulo: `Jogo de Velas de Ignição${v}` };
-  if (/bomba/i.test(t)) return { preco: 219.00, marca: "Bosch / Magneti Marelli", titulo: `Bomba de Combustível${v}` };
-  if (/bieleta/i.test(t)) return { preco: 65.00, marca: "Nakata / Axios", titulo: `Bieleta de Suspensão${v}` };
-  if (/pivo|pivô|terminal/i.test(t)) return { preco: 78.00, marca: "Viemar / Nakata", titulo: `Pivô de Suspensão${v}` };
-  if (/bateria/i.test(t)) return { preco: 420.00, marca: "Moura / Heliar", titulo: `Bateria 60Ah${v}` };
-  return { preco: 149.90, marca: "Original / Homologada", titulo: `${termo}${v}` };
-}
 
 export const MODELOS_COMPATIVEIS_MAP: Record<string, string[]> = {
   // Volkswagen
@@ -1501,7 +1503,7 @@ export async function buscarPrecoMercadoLivre(
         // Encontra o primeiro anúncio que passe na validação rigorosa de compatibilidade
         const item = results.find((it: any) => {
           const preco = Number(it?.price) || Number(it?.original_price) || 0;
-          if (preco <= 0 || !it?.title) return false;
+          if (preco < 5 || !it?.title) return false;
           return validarTituloML(it.title, veiculoDetectado, pecaPadronizada, queryLimpa).valido;
         });
 
@@ -1596,7 +1598,7 @@ export async function buscarPrecoMercadoLivre(
             const matchPreco = chunk.match(/class="[^"]*andes-money-amount__fraction[^"]*"[^>]*>([\d\.]+)/);
             const matchCents = chunk.match(/class="[^"]*andes-money-amount__cents[^"]*"[^>]*>([\d]+)/);
             const matchLink = chunk.match(
-              /href="(https:\/\/[^"]*(?:mercadolivre\.com\.br\/[^\/]+\/up\/MLBU|produto\.mercadolivre\.com\.br\/MLB-|mercadolivre\.com\.br\/p\/MLB)[^"]*)"/
+              /href="(https:\/\/[^"]*(?:mercadolivre\.com\.br\/[^\/]+\/(?:p|up)\/MLB|produto\.mercadolivre\.com\.br\/MLB-|mercadolivre\.com\.br\/p\/MLB|click1\.mercadolivre\.com\.br)[^"]*)"/
             );
             const matchThumb = chunk.match(/(?:src|data-src)="(https:\/\/[^"]*(?:http2\.mlstatic\.com\/D_[^"]*))"/);
 
@@ -1605,7 +1607,7 @@ export async function buscarPrecoMercadoLivre(
               const centavos = matchCents ? matchCents[1] : "00";
               const precoNumerico = parseFloat(`${valorFormatado}.${centavos}`);
 
-              if (precoNumerico > 0) {
+              if (precoNumerico >= 5) {
                 const rawLink = matchLink ? matchLink[1].replace(/&amp;/g, "&") : linkContingencia;
                 const cleanLink = rawLink.split("#")[0].split("?")[0];
                 const linkAfiliado = formatarLinkAfiliado(cleanLink);

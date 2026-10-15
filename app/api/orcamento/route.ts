@@ -16,22 +16,37 @@ const CLIENT_SECRET = process.env.ML_CLIENT_SECRET || 'yjbLRYJenI5VI8r7bH4JamoeK
 
 function formatarLinkAfiliado(url: string): string {
   if (!url || typeof url !== "string") return "";
-  const trimmed = url.trim();
-  if (trimmed.startsWith("/")) return trimmed;
-
-  // NUNCA permita links no formato /p/MLB... que geram "Produto Indisponível"
-  if (trimmed.includes("/p/MLB") || trimmed.includes("mercadolivre.com.br/p/")) {
-    return "";
+  let trimmed = url.trim();
+  if (trimmed.startsWith("/")) {
+    trimmed = `https://www.mercadolivre.com.br${trimmed}`;
   }
 
-  // Se já contém matt_tool, retorna a URL diretamente
-  if (trimmed.includes("matt_tool=")) {
+  // Se for click1, tentar extrair a URL interna limpa do produto se houver
+  if (trimmed.includes("click1.mercadolivre.com.br")) {
+    try {
+      const parsed = new URL(trimmed);
+      const innerUrl = parsed.searchParams.get("url");
+      if (innerUrl) {
+        trimmed = decodeURIComponent(innerUrl);
+      }
+    } catch {}
+  }
+
+  // Se já contém matt_tool e matt_word, retorna a URL diretamente
+  if (trimmed.includes("matt_tool=") && trimmed.includes("matt_word=")) {
     return trimmed;
   }
 
-  const [baseWithoutHash] = trimmed.split("#");
-  const sep = baseWithoutHash.includes("?") ? "&" : "?";
-  return `${baseWithoutHash}${sep}matt_tool=${ML_TOOL}&matt_word=${ML_WORD}#matt_tool=${ML_TOOL}&matt_word=${ML_WORD}`;
+  // Se ainda for click1 (sem innerUrl), anexa mantendo os parâmetros existentes
+  if (trimmed.includes("click1.mercadolivre.com.br")) {
+    const [baseWithoutHash] = trimmed.split("#");
+    const sep = baseWithoutHash.includes("?") ? "&" : "?";
+    return `${baseWithoutHash}${sep}matt_tool=${ML_TOOL}&matt_word=${ML_WORD}#matt_tool=${ML_TOOL}&matt_word=${ML_WORD}`;
+  }
+
+  // Para produtos (/p/MLB, /up/MLB, produto.mercadolivre.com.br/MLB-), limpa query/hash anteriores e anexa
+  const cleanBase = trimmed.split("?")[0].split("#")[0];
+  return `${cleanBase}?matt_tool=${ML_TOOL}&matt_word=${ML_WORD}#matt_tool=${ML_TOOL}&matt_word=${ML_WORD}`;
 }
 
 interface MLTokenCache {
@@ -192,34 +207,6 @@ export const MARCAS_AUTOPECAS = [
   "dana", "spicer", "albarus", "taranto", "takao"
 ];
 
-function estimarPrecoPeca(nomePeca: string): number {
-  const p = (nomePeca || "").toLowerCase();
-  if (p.includes("embreagem")) return 549.90;
-  if (p.includes("vela")) return 129.90;
-  if (p.includes("correia") && p.includes("tensor")) return 219.90;
-  if (p.includes("correia")) return 149.90;
-  if (p.includes("tensor")) return 119.90;
-  if (p.includes("pastilha")) return 119.90;
-  if (p.includes("disco")) return 229.90;
-  if ((p.includes("filtro") && p.includes("oleo")) || (p.includes("filtro") && p.includes("óleo"))) return 45.90;
-  if (p.includes("filtro") && p.includes("ar")) return 49.90;
-  if ((p.includes("filtro") && p.includes("combustivel")) || (p.includes("filtro") && p.includes("combustível"))) return 42.90;
-  if (p.includes("filtro") && p.includes("cabine")) return 39.90;
-  if (p.includes("filtro")) return 45.90;
-  if (p.includes("amortecedor")) return 289.90;
-  if (p.includes("oleo") || p.includes("óleo")) return 169.90;
-  if (p.includes("bomba") && (p.includes("agua") || p.includes("água"))) return 179.90;
-  if (p.includes("bomba") && p.includes("combustivel")) return 239.90;
-  if (p.includes("bomba")) return 210.00;
-  if (p.includes("bateria")) return 429.90;
-  if (p.includes("radiador")) return 369.90;
-  if (p.includes("bucha") || p.includes("pivo") || p.includes("pivô") || p.includes("bieleta")) return 79.90;
-  if (p.includes("terminal")) return 89.90;
-  if (p.includes("coxim")) return 139.90;
-  if (p.includes("rolamento")) return 159.90;
-  return 149.90;
-}
-
 function normalizarTexto(str: string): string {
   return (str || "")
     .toLowerCase()
@@ -375,7 +362,7 @@ function extrairOrcamentoPorCodigosLocalmente(textoBruto: string): {
 // ============================================================================
 interface MLItemResultado {
   titulo: string;
-  preco: number;
+  preco: number | null;
   imagem: string | null;
   linkAfiliado: string;
   encontrado: boolean;
@@ -412,9 +399,9 @@ function validarCodigoNoTitulo(titulo: string, codigo: string): boolean {
 
 /**
  * Extrai todos os anúncios retornados no HTML:
- * Tanto via regex em links produto.mercadolivre.com.br/MLB- / mercadolivre.com.br/
- * com poly-component__title / ui-search-item__title
- * quanto pelo JSON __PRELOADED_STATE__ / initialState.
+ * 1. Schema.org JSON-LD (@graph / Product com offers e url direta)
+ * 2. JSON __PRELOADED_STATE__ / initialState
+ * 3. Regex em cards (produto.mercadolivre.com.br/MLB-, /p/MLB, /up/MLB, click1.mercadolivre.com.br)
  */
 function extrairTodosAnuncios(html: string): MLAnuncioExtraido[] {
   if (!html || html.includes("suspicious-traffic")) {
@@ -423,7 +410,41 @@ function extrairTodosAnuncios(html: string): MLAnuncioExtraido[] {
 
   const anuncios: MLAnuncioExtraido[] = [];
 
-  // 1. Extração via JSON __PRELOADED_STATE__ ou initialState
+  // 1. Extração via JSON-LD Schema.org (@graph ou lista de Product)
+  try {
+    const jsonLdMatches = [...html.matchAll(/<script[^>]+type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi)];
+    for (const m of jsonLdMatches) {
+      try {
+        const data = JSON.parse(m[1]);
+        const graph = data["@graph"] || (Array.isArray(data) ? data : [data]);
+        for (const obj of graph) {
+          if (obj && (obj["@type"] === "Product" || obj.name) && obj.offers) {
+            const rawPrice = typeof obj.offers.price === "number" ? obj.offers.price : parseFloat(obj.offers.price);
+            const rawLink = obj.offers.url || obj.url;
+            const rawTitle = obj.name;
+            let imagem: string | null = obj.image || null;
+            if (imagem && typeof imagem === "string") {
+              imagem = imagem.replace(/-[IV]\.(jpg|webp)/g, "-O.$1").replace(/^http:\/\//i, "https://");
+            }
+            if (rawPrice > 0 && rawTitle && rawLink) {
+              anuncios.push({
+                titulo: String(rawTitle).trim(),
+                preco: rawPrice,
+                imagem,
+                link: String(rawLink).trim(),
+              });
+            }
+          }
+        }
+      } catch {
+        // Silencioso se script json-ld for inválido
+      }
+    }
+  } catch {
+    // Silencioso
+  }
+
+  // 2. Extração via JSON __PRELOADED_STATE__ ou initialState
   try {
     const matchScript =
       html.match(/window\.__PRELOADED_STATE__\s*=\s*({[\s\S]+?});<\/script>/) ||
@@ -440,22 +461,20 @@ function extrairTodosAnuncios(html: string): MLAnuncioExtraido[] {
           (typeof obj.price === "number" || (obj.price && typeof obj.price.fraction === "number"))
         ) {
           const rawLink = String(obj.permalink || obj.url);
-          if (!rawLink.includes("/p/MLB") && !rawLink.includes("mercadolivre.com.br/p/")) {
-            const rawPrice = typeof obj.price === "number"
-              ? obj.price
-              : parseFloat(`${obj.price.fraction}.${obj.price.cents || 0}`);
-            if (rawPrice > 0) {
-              let imagem: string | null = obj.thumbnail || obj.image || obj.pictures?.[0]?.url || null;
-              if (imagem) {
-                imagem = imagem.replace(/-[IV]\.(jpg|webp)/g, "-O.$1").replace(/^http:\/\//i, "https://");
-              }
-              anuncios.push({
-                titulo: String(obj.title || obj.name).trim(),
-                preco: rawPrice,
-                imagem,
-                link: rawLink,
-              });
+          const rawPrice = typeof obj.price === "number"
+            ? obj.price
+            : parseFloat(`${obj.price.fraction}.${obj.price.cents || 0}`);
+          if (rawPrice > 0) {
+            let imagem: string | null = obj.thumbnail || obj.image || obj.pictures?.[0]?.url || null;
+            if (imagem) {
+              imagem = imagem.replace(/-[IV]\.(jpg|webp)/g, "-O.$1").replace(/^http:\/\//i, "https://");
             }
+            anuncios.push({
+              titulo: String(obj.title || obj.name).trim(),
+              preco: rawPrice,
+              imagem,
+              link: rawLink,
+            });
           }
         }
         for (const k of Object.keys(obj)) {
@@ -470,24 +489,20 @@ function extrairTodosAnuncios(html: string): MLAnuncioExtraido[] {
     // Silencioso se não houver JSON parseável
   }
 
-  // 2. Extração via Regex no HTML (poly-card, ui-search-layout__item, ui-search-result)
+  // 3. Extração via Regex no HTML (poly-card, ui-search-layout__item, ui-search-result)
   const secoes = html.split(/(?:class="[^"]*(?:ui-search-layout__item|poly-card|ui-search-result)[^"]*")/i);
   const blocos = secoes.length > 1 ? secoes.slice(1) : [html];
 
   for (const secao of blocos) {
     const linkMatch =
-      secao.match(/href="(https:\/\/[^"]*(?:produto\.mercadolivre\.com\.br\/MLB|mercadolivre\.com\.br\/MLB)[^"]*)"/i) ||
-      secao.match(/href="(\/[^"]*MLB-\d+[^"]*)"/i);
+      secao.match(/href="(https:\/\/[^"]*(?:produto\.mercadolivre\.com\.br\/MLB|mercadolivre\.com\.br\/[^\/]+\/(?:p|up)\/MLB|mercadolivre\.com\.br\/MLB|click1\.mercadolivre\.com\.br)[^"]*)"/i) ||
+      secao.match(/href="(\/[^"]*(?:MLB-\d+|\/p\/MLB|\/up\/MLB)[^"]*)"/i);
 
     if (!linkMatch) continue;
 
     let link = linkMatch[1];
     if (link.startsWith("/")) {
       link = `https://www.mercadolivre.com.br${link}`;
-    }
-
-    if (link.includes("/p/MLB") || link.includes("mercadolivre.com.br/p/")) {
-      continue;
     }
 
     const titleMatch =
@@ -509,7 +524,7 @@ function extrairTodosAnuncios(html: string): MLAnuncioExtraido[] {
     if (!fracMatch) continue;
 
     const fracStr = fracMatch[1].replace(/\./g, "");
-    const centsMatch = secao.match(/class="[^"]*andes-money-amount__cents"[^>]*>([0-9]{2})</i);
+    const centsMatch = secao.match(/class="[^"]*(?:andes-money-amount__cents|price-tag-cents)"[^>]*>([0-9]{2})</i);
     const centsStr = centsMatch ? centsMatch[1] : "00";
     const preco = parseFloat(`${fracStr}.${centsStr}`);
     if (isNaN(preco) || preco <= 0) continue;
@@ -548,15 +563,27 @@ function extrairTodosAnuncios(html: string): MLAnuncioExtraido[] {
   return Array.from(mapPorLink.values());
 }
 
+const CHROME_MOBILE_HEADERS: Record<string, string> = {
+  "User-Agent": "Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.179 Mobile Safari/537.36",
+  "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+  "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+  "Sec-Ch-Ua": "\"Not-A.Brand\";v=\"99\", \"Chromium\";v=\"124\", \"Google Chrome\";v=\"124\"",
+  "Sec-Ch-Ua-Mobile": "?1",
+  "Sec-Ch-Ua-Platform": "\"Android\"",
+  "Sec-Fetch-Dest": "document",
+  "Sec-Fetch-Mode": "navigate",
+  "Sec-Fetch-Site": "none",
+  "Sec-Fetch-User": "?1",
+  "Upgrade-Insecure-Requests": "1",
+};
+
 /**
- * Busca de anúncio direto no Mercado Livre com MENOR PREÇO:
- * 1. Consulta URL ordenada por menor preço: https://lista.mercadolivre.com.br/${slugLimpo}_OrderId_PRICE_NoIndex_True
- * 2. Envia headers de navegador real para evitar bloqueios
- * 3. Extrai anúncios via regex e JSON __PRELOADED_STATE__
- * 4. Filtra por código no título e preço coerente (> R$ 20)
- * 5. Ordena do menor para o maior preço e pega o primeiro
- * 6. Limpa query string do permalink direto e anexa ?matt_tool=31976628&matt_word=hubmultimercado
- * 7. Fallback seguro com slug limpo (sem espaços para evitar 301 do ML que limpa a query string)
+ * Busca o anúncio real do produto no Mercado Livre:
+ * 1. Tenta fetch direto na URL https://lista.mercadolivre.com.br/${termo}_NoIndex_True com headers de Chrome Mobile.
+ * 2. Se status !== 200 ou 0 anúncios encontrados (bloqueio 403/captcha), tenta Googlebot UA e fallback automático via AllOrigins (https://api.allorigins.win/raw?url=...).
+ * 3. Também tenta a API oficial (https://api.mercadolibre.com/sites/MLB/search?q=...) com Bearer Token OAuth.
+ * 4. Filtra anúncios com preco >= 5 e código no título, ordenando pelo menor preço real.
+ * 5. Retorna o link DIRETO do produto com parâmetros de afiliado. NUNCA retorna lista de busca se encontrar anúncio.
  */
 async function buscarAnuncioPorCodigo(
   codigo: string,
@@ -571,94 +598,166 @@ async function buscarAnuncioPorCodigo(
 
   const temCodigoReal = Boolean(codLimpo && codLimpo !== "S/ CÓDIGO");
 
-  // Termo cirúrgico: APENAS `${codigo} ${marca}`.trim() (se não tiver marca, `${codigo} ${nome}`)
+  // Termo cirúrgico: se tem código real, prioriza o código (ex: PSL55)
   let termoBusca = "";
-  if (temCodigoReal && marcaLimpa && marcaLimpa.toLowerCase() !== "original") {
-    termoBusca = `${codLimpo} ${marcaLimpa}`.trim();
-  } else if (temCodigoReal) {
-    termoBusca = `${codLimpo} ${nomeLimpo}`.trim();
+  if (temCodigoReal) {
+    termoBusca = codLimpo;
+  } else if (marcaLimpa && marcaLimpa.toLowerCase() !== "original") {
+    termoBusca = `${nomeLimpo} ${marcaLimpa}`.trim();
   } else {
-    termoBusca = `${nomeLimpo} ${marcaLimpa !== "Original" ? marcaLimpa : ""}`.trim();
+    termoBusca = nomeLimpo || "Peça Automotiva";
   }
 
-  // Slug limpo (letras minúsculas e hífens, sem espaços)
   const slugLimpo = gerarSlugLimpoML(termoBusca);
-
-  // URL já ordenada por menor preço no Mercado Livre
-  const searchUrl = `https://lista.mercadolivre.com.br/${encodeURIComponent(slugLimpo)}_OrderId_PRICE_NoIndex_True`;
-
-  // Fallback que não perde o código de afiliado (sem espaços para evitar redirecionamento 301 do ML)
-  const fallbackLink = `https://lista.mercadolivre.com.br/${slugLimpo}_OrderId_PRICE_NoIndex_True?matt_tool=${ML_TOOL}&matt_word=${ML_WORD}#matt_tool=${ML_TOOL}&matt_word=${ML_WORD}`;
-
-  const precoEstimado = (precoFornecedor && precoFornecedor > 0)
-    ? precoFornecedor
-    : estimarPrecoPeca(nomeLimpo || codLimpo);
+  const urlMl = `https://lista.mercadolivre.com.br/${slugLimpo}_NoIndex_True`;
+  const fallbackLink = formatarLinkAfiliado(urlMl);
 
   const tituloGarantido = `${marcaLimpa && marcaLimpa !== "Original" ? `${marcaLimpa} ` : ""}${temCodigoReal ? `${codLimpo} - ` : ""}${nomeLimpo || "Peça Automotiva"}`.trim();
 
-  try {
-    console.log(`[Busca ML Menor Preço] Consultando "${searchUrl}"...`);
+  let todosAnuncios: MLAnuncioExtraido[] = [];
 
-    const res = await fetch(searchUrl, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "pt-BR,pt;q=0.9",
-        "sec-fetch-mode": "navigate",
-        "sec-fetch-site": "none",
-        "sec-fetch-dest": "document",
-      },
+  // 1. Fetch direto com headers completos de Chrome Mobile
+  try {
+    console.log(`[Busca ML] 1. Fetch direto Chrome Mobile: "${urlMl}"`);
+    const resDireto = await fetch(urlMl, {
+      headers: CHROME_MOBILE_HEADERS,
       signal,
       cache: "no-store",
     });
 
-    if (res.ok) {
-      const html = await res.text();
-      const todosAnuncios = extrairTodosAnuncios(html);
-
-      // Filtra apenas anúncios cujo título contenha o código da peça e preço coerente (> R$ 20)
-      const anunciosValidos = todosAnuncios.filter((a) => {
-        const precoValido = typeof a.preco === "number" && a.preco > 20;
-        if (!precoValido) return false;
-        if (temCodigoReal) {
-          return validarCodigoNoTitulo(a.titulo, codLimpo);
-        }
-        return true;
-      });
-
-      // Ordena os anúncios válidos do MENOR para o MAIOR preço (o mais barato primeiro!)
-      anunciosValidos.sort((a, b) => a.preco - b.preco);
-
-      if (anunciosValidos.length > 0) {
-        const maisBarato = anunciosValidos[0];
-        // Pega o link DIRETO desse produto, limpa qualquer query string antiga e anexa ?matt_tool=31976628&matt_word=hubmultimercado
-        const urlLimpa = maisBarato.link.split("?")[0].split("#")[0];
-        const linkDiretoAfiliado = `${urlLimpa}?matt_tool=${ML_TOOL}&matt_word=${ML_WORD}`;
-
-        console.log(`[Busca ML Menor Preço Sucesso] "${maisBarato.titulo}" | R$ ${maisBarato.preco} -> ${linkDiretoAfiliado}`);
-        return {
-          titulo: maisBarato.titulo,
-          preco: maisBarato.preco,
-          imagem: maisBarato.imagem,
-          linkAfiliado: linkDiretoAfiliado,
-          encontrado: true,
-        };
-      } else {
-        console.warn(`[Busca ML Menor Preço] Nenhum anúncio com preço > R$ 20 contém o código "${codLimpo}" no título.`);
-      }
+    if (resDireto.status === 200) {
+      const htmlDireto = await resDireto.text();
+      todosAnuncios = extrairTodosAnuncios(htmlDireto);
+    } else {
+      console.warn(`[Busca ML] Fetch direto retornou status ${resDireto.status}`);
     }
   } catch (err: any) {
-    console.warn(`[Busca ML Menor Preço] Bloqueio ou falha ao consultar "${searchUrl}":`, err?.message || err);
+    console.warn(`[Busca ML] Fetch direto falhou:`, err?.message || err);
   }
 
-  // Fallback que não perde o código de afiliado (zero produto indisponível)
-  console.log(`[Busca ML Fallback Garantido] Usando link ordenado por menor preço com afiliado: ${fallbackLink}`);
+  // 1.1 Fallback direto com Googlebot UA (para contornar suspicious-traffic se Chrome Mobile tomar bloqueio)
+  if (todosAnuncios.length === 0 && (!signal || !signal.aborted)) {
+    try {
+      console.log(`[Busca ML] 1.1. Fallback Googlebot UA: "${urlMl}"`);
+      const resGbot = await fetch(urlMl, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "Accept-Language": "pt-BR,pt;q=0.9",
+        },
+        signal,
+        cache: "no-store",
+      });
+      if (resGbot.status === 200) {
+        const htmlGbot = await resGbot.text();
+        todosAnuncios = extrairTodosAnuncios(htmlGbot);
+      }
+    } catch (err: any) {
+      console.warn(`[Busca ML] Fetch Googlebot falhou:`, err?.message || err);
+    }
+  }
+
+  // 2. Fallback automático buscando a mesma URL através do proxy allorigins
+  if (todosAnuncios.length === 0 && (!signal || !signal.aborted)) {
+    try {
+      const allOriginsUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(urlMl)}`;
+      console.log(`[Busca ML] 2. Fallback AllOrigins: "${allOriginsUrl}"`);
+      const resProxy = await fetch(allOriginsUrl, {
+        signal,
+        cache: "no-store",
+      });
+      if (resProxy.ok) {
+        const htmlProxy = await resProxy.text();
+        todosAnuncios = extrairTodosAnuncios(htmlProxy);
+      } else {
+        console.warn(`[Busca ML] AllOrigins retornou status ${resProxy.status}`);
+      }
+    } catch (err: any) {
+      console.warn(`[Busca ML] Fallback AllOrigins falhou:`, err?.message || err);
+    }
+  }
+
+  // 3. Fallback tentando a API oficial com Bearer Token OAuth
+  if (todosAnuncios.length === 0 && (!signal || !signal.aborted)) {
+    try {
+      const token = await obterTokenMercadoLivre();
+      const apiUrl = `https://api.mercadolibre.com/sites/MLB/search?q=${encodeURIComponent(termoBusca)}`;
+      console.log(`[Busca ML] 3. Fallback API Oficial OAuth: "${apiUrl}"`);
+      const apiHeaders: Record<string, string> = {
+        Accept: "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      };
+      if (token) {
+        apiHeaders["Authorization"] = `Bearer ${token}`;
+      }
+      const resApi = await fetch(apiUrl, {
+        headers: apiHeaders,
+        signal,
+        cache: "no-store",
+      });
+      if (resApi.ok) {
+        const data = await resApi.json();
+        const results = Array.isArray(data.results) ? data.results : [];
+        for (const item of results) {
+          const rawPrice = Number(item.price) || 0;
+          const rawTitle = String(item.title || "").trim();
+          const rawLink = String(item.permalink || "").trim();
+          let imagem: string | null = item.thumbnail || null;
+          if (imagem) {
+            imagem = imagem.replace(/-[IV]\.(jpg|webp)/g, "-O.$1").replace(/^http:\/\//i, "https://");
+          }
+          if (rawPrice > 0 && rawTitle && rawLink) {
+            todosAnuncios.push({
+              titulo: rawTitle,
+              preco: rawPrice,
+              imagem,
+              link: rawLink,
+            });
+          }
+        }
+      } else {
+        console.warn(`[Busca ML] API Oficial retornou status ${resApi.status}`);
+      }
+    } catch (err: any) {
+      console.warn(`[Busca ML] Fallback API Oficial falhou:`, err?.message || err);
+    }
+  }
+
+  // 4. Filtra anúncios válidos: preço mínimo >= 5 e código da peça presente no título
+  const anunciosValidos = todosAnuncios.filter((a) => {
+    const precoValido = typeof a.preco === "number" && a.preco >= 5;
+    if (!precoValido) return false;
+    if (temCodigoReal) {
+      return validarCodigoNoTitulo(a.titulo, codLimpo);
+    }
+    return true;
+  });
+
+  // Ordena do menor para o maior preço real
+  anunciosValidos.sort((a, b) => a.preco - b.preco);
+
+  if (anunciosValidos.length > 0) {
+    const maisBarato = anunciosValidos[0];
+    // Pega o link DIRETO da página do produto e anexa sempre os parâmetros de afiliado
+    const linkDiretoAfiliado = formatarLinkAfiliado(maisBarato.link);
+
+    console.log(`[Busca ML Menor Preço Real] "${maisBarato.titulo}" | R$ ${maisBarato.preco} -> ${linkDiretoAfiliado}`);
+    return {
+      titulo: maisBarato.titulo,
+      preco: maisBarato.preco,
+      imagem: maisBarato.imagem,
+      linkAfiliado: linkDiretoAfiliado,
+      encontrado: true,
+    };
+  }
+
+  console.warn(`[Busca ML] Nenhum anúncio com preco >= 5 contém o código "${codLimpo}" no título.`);
   return {
     titulo: tituloGarantido,
-    preco: precoEstimado,
+    preco: (precoFornecedor && precoFornecedor > 0) ? precoFornecedor : null,
     imagem: null,
     linkAfiliado: fallbackLink,
-    encontrado: true,
+    encontrado: false,
   };
 }
 
@@ -830,16 +929,16 @@ export async function POST(request: NextRequest) {
           clearTimeout(timeoutId);
           const termo = `${peca.marca && peca.marca !== "Original" ? `${peca.marca} ` : ""}${peca.codigo || peca.nome}`.trim();
           const slug = gerarSlugLimpoML(termo);
-          const linkFallback = `https://lista.mercadolivre.com.br/${slug}_OrderId_PRICE_NoIndex_True?matt_tool=${ML_TOOL}&matt_word=${ML_WORD}#matt_tool=${ML_TOOL}&matt_word=${ML_WORD}`;
+          const linkFallback = `https://lista.mercadolivre.com.br/${slug}_NoIndex_True?matt_tool=${ML_TOOL}&matt_word=${ML_WORD}#matt_tool=${ML_TOOL}&matt_word=${ML_WORD}`;
           const precoFallback = peca.preco_fornecedor && peca.preco_fornecedor > 0
             ? peca.preco_fornecedor
-            : estimarPrecoPeca(peca.nome);
+            : null;
           return {
             titulo: `${peca.marca ? `${peca.marca} ` : ""}${peca.codigo ? `${peca.codigo} - ` : ""}${peca.nome}`,
             preco: precoFallback,
             imagem: null,
             linkAfiliado: linkFallback,
-            encontrado: true,
+            encontrado: false,
           };
         }
       })
@@ -854,21 +953,24 @@ export async function POST(request: NextRequest) {
         ? peca.preco_fornecedor
         : null;
 
-      const precoML = (dadosItem?.preco && dadosItem.preco > 0) ? dadosItem.preco : null;
-      const precoFinal = precoML || precoFornecedor || estimarPrecoPeca(peca.nome);
-      const precoFormatado = precoFinal.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+      const precoML = (dadosItem?.encontrado && typeof dadosItem?.preco === "number" && dadosItem.preco > 0)
+        ? dadosItem.preco
+        : null;
+
+      // EXCLUSIVAMENTE o preço real do anúncio do Mercado Livre ou preço fornecedor se houver. SEM NENHUM PREÇO INVENTADO.
+      const precoFinal = precoML ?? (precoFornecedor ?? 0);
+      const precoFormatado = precoFinal > 0
+        ? precoFinal.toLocaleString("pt-BR", { style: "currency", currency: "BRL" })
+        : "Sob Consulta";
 
       const termo = `${peca.marca && peca.marca !== "Original" ? `${peca.marca} ` : ""}${peca.codigo || peca.nome}`.trim();
       const slug = gerarSlugLimpoML(termo);
-      const linkGarantido = `https://lista.mercadolivre.com.br/${slug}_OrderId_PRICE_NoIndex_True?matt_tool=${ML_TOOL}&matt_word=${ML_WORD}#matt_tool=${ML_TOOL}&matt_word=${ML_WORD}`;
+      const linkGarantido = `https://lista.mercadolivre.com.br/${slug}_NoIndex_True?matt_tool=${ML_TOOL}&matt_word=${ML_WORD}#matt_tool=${ML_TOOL}&matt_word=${ML_WORD}`;
 
+      // Quando o anúncio é encontrado, usa SEMPRE o link direto do produto com afiliado. NUNCA lista de busca.
       let linkFinal = linkGarantido;
-      if (
-        dadosItem?.linkAfiliado &&
-        !dadosItem.linkAfiliado.includes("/p/MLB") &&
-        !dadosItem.linkAfiliado.includes("mercadolivre.com.br/p/")
-      ) {
-        linkFinal = formatarLinkAfiliado(dadosItem.linkAfiliado) || linkGarantido;
+      if (dadosItem && dadosItem.encontrado && dadosItem.linkAfiliado) {
+        linkFinal = formatarLinkAfiliado(dadosItem.linkAfiliado);
       }
 
       const tituloFinal = dadosItem?.titulo || `${peca.marca ? `${peca.marca} ` : ""}${peca.codigo ? `${peca.codigo} - ` : ""}${peca.nome}`;
@@ -891,7 +993,7 @@ export async function POST(request: NextRequest) {
         linkAfiliado: linkFinal,
         link_afiliado: linkFinal,
         link: linkFinal,
-        encontrado: dadosItem?.encontrado ?? true,
+        encontrado: dadosItem?.encontrado ?? false,
 
         // Compatibilidade legada
         peca_padronizada: peca.nome,
@@ -903,7 +1005,7 @@ export async function POST(request: NextRequest) {
         valor: precoFinal,
         preco_real_ml: precoML,
         preco_formatado: precoFormatado,
-        preco_estimado: precoFinal,
+        preco_estimado: precoFinal > 0 ? precoFinal : null,
         tem_full: false,
       };
     });
@@ -925,7 +1027,7 @@ export async function POST(request: NextRequest) {
       .trim();
 
     const slugKit = gerarSlugLimpoML(codigosKit || "kit-pecas");
-    const linkKitCompleto = `https://lista.mercadolivre.com.br/${slugKit}_OrderId_PRICE_NoIndex_True?matt_tool=${ML_TOOL}&matt_word=${ML_WORD}#matt_tool=${ML_TOOL}&matt_word=${ML_WORD}`;
+    const linkKitCompleto = `https://lista.mercadolivre.com.br/${slugKit}_NoIndex_True?matt_tool=${ML_TOOL}&matt_word=${ML_WORD}#matt_tool=${ML_TOOL}&matt_word=${ML_WORD}`;
 
     return NextResponse.json({
       success: true,
