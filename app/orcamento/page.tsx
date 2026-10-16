@@ -145,7 +145,6 @@ const getNumericPrice = (item: ItemOrcamento | undefined | null): number => {
     item.preco ??
     item.price ??
     item.valor ??
-    item.preco_fornecedor ??
     item.preco_estimado;
 
   if (val === null || val === undefined || val === "") return 0;
