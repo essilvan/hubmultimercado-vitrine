@@ -173,16 +173,16 @@ const getNumericPrice = (item: ItemOrcamento | undefined | null): number => {
 
 const getItemAffiliateUrl = (item: ItemOrcamento): string => {
   const directUrl =
+    item.permalink ||
     item.linkAfiliado ||
     item.link_afiliado ||
     item.affiliate_link ||
     item.url ||
-    item.permalink ||
     item.link_ml ||
     item.link ||
     item.link_anuncio;
 
-  if (directUrl && typeof directUrl === "string" && directUrl.trim()) {
+  if (directUrl && typeof directUrl === "string" && directUrl.trim() && directUrl.trim() !== "#") {
     const trimmed = directUrl.trim();
     if (trimmed.startsWith("/")) return trimmed;
     if (trimmed.includes("meli.la/")) return trimmed.split("?")[0].split("#")[0];
@@ -190,18 +190,12 @@ const getItemAffiliateUrl = (item: ItemOrcamento): string => {
     return formatarLinkAfiliadoFrontend(trimmed);
   }
 
-  const cod = item.codigo && item.codigo !== "S/ CÓDIGO" ? item.codigo : "";
-  const marca = item.marca && item.marca !== "Original" ? item.marca : "";
-  const termo = `${marca ? `${marca} ` : ""}${cod || item.nome || ""}`.trim();
-  const slugLimpo = termo
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
+  const cod = item.codigo && item.codigo !== "S/ CÓDIGO" ? item.codigo.trim() : "";
+  const marca = item.marca && item.marca !== "Original" ? item.marca.trim() : "";
+  const termo = `${marca ? `${marca} ` : ""}${cod || item.nome || "Peca Automotiva"}`.trim();
+  const searchUrl = `https://lista.mercadolivre.com.br/${encodeURIComponent(termo)}`;
 
-  return `https://lista.mercadolivre.com.br/${slugLimpo}_OrderId_PRICE_NoIndex_True?matt_tool=${ML_TOOL}&matt_word=${ML_WORD}#matt_tool=${ML_TOOL}&matt_word=${ML_WORD}`;
+  return formatarLinkAfiliadoFrontend(searchUrl);
 };
 
 function gerarTextoClienteFinal(
@@ -223,8 +217,8 @@ function gerarTextoClienteFinal(
       const marca = item.marca && item.marca !== "Original" ? `${item.marca} ` : "";
       const nome = item.nome || item.peca_padronizada || "Peça";
       const precoML = getNumericPrice(item);
-      const precoMLTexto = formatPrice(precoML);
-      const precoForn = item.preco_fornecedor ? formatPrice(item.preco_fornecedor) : null;
+      const precoMLTexto = precoML > 0 ? formatPrice(precoML * qtd) : "Consultar no anúncio";
+      const precoForn = item.preco_fornecedor ? formatPrice(Number(item.preco_fornecedor) * qtd) : null;
       const link = getItemAffiliateUrl(item);
 
       msg += `${index + 1}. *${qtd}x ${cod}${marca}${nome}*\n`;
@@ -1005,8 +999,24 @@ TECFIL PSL55 - Filtro de Óleo (R$ 42,00)"
                         const precoUnitML = getNumericPrice(item);
                         const subtotalML = qtd * precoUnitML;
                         const precoForn = typeof item.preco_fornecedor === "number" ? item.preco_fornecedor : null;
-                        const tituloReal = item.titulo || item.titulo_anuncio || item.nome || "Peça";
-                        const imagemReal = item.imagem || item.imagem_url || item.thumbnail;
+                        const nomeOrcamento = (item.nome || item.peca_padronizada || "Peça").trim();
+                        const rawTituloML = (item.titulo_anuncio || item.titulo || "").trim();
+                        const stringOrcamentoRepetida = `${item.marca || ""} ${item.codigo || ""} - ${nomeOrcamento}`
+                          .replace(/\s+/g, " ")
+                          .trim()
+                          .toLowerCase();
+                        const tituloAnuncioML =
+                          item.encontrado !== false &&
+                          rawTituloML.length > 0 &&
+                          rawTituloML.toLowerCase() !== nomeOrcamento.toLowerCase() &&
+                          rawTituloML.toLowerCase() !== stringOrcamentoRepetida
+                            ? rawTituloML
+                            : null;
+
+                        const rawImg = item.thumbnail || item.imagem || item.imagem_url;
+                        const imagemReal = rawImg
+                          ? rawImg.replace(/-I\.jpg/gi, "-O.jpg").replace(/-I\.webp/gi, "-O.webp")
+                          : null;
                         const codigo = item.codigo && item.codigo !== "S/ CÓDIGO" ? item.codigo : null;
                         const marca = item.marca && item.marca !== "Original" ? item.marca : "Original / Homologada";
 
@@ -1051,28 +1061,34 @@ TECFIL PSL55 - Filtro de Óleo (R$ 42,00)"
                             {/* 4. MARCA & DESCRIÇÃO DA PEÇA */}
                             <td className="py-3.5 px-4 align-middle">
                               <div className="flex items-center gap-3">
-                                {imagemReal ? (
-                                  <div className="w-11 h-11 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white flex items-center justify-center overflow-hidden shrink-0 shadow-xs">
-                                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                                <div className="w-12 h-12 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white flex items-center justify-center overflow-hidden shrink-0 shadow-xs">
+                                  {imagemReal ? (
+                                    /* eslint-disable-next-line @next/next/no-img-element */
                                     <img
                                       src={imagemReal}
-                                      alt={tituloReal}
+                                      alt={tituloAnuncioML || nomeOrcamento}
                                       className="w-full h-full object-contain p-0.5"
+                                      loading="lazy"
                                     />
-                                  </div>
-                                ) : null}
+                                  ) : (
+                                    <Package className="w-5 h-5 text-zinc-300 dark:text-zinc-600" />
+                                  )}
+                                </div>
 
                                 <div className="min-w-0 flex-1">
                                   <div className="font-bold text-sm text-zinc-900 dark:text-zinc-100 leading-tight flex items-center flex-wrap gap-1.5">
                                     <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-bold bg-zinc-100 dark:bg-zinc-800 text-zinc-800 dark:text-zinc-200 border border-zinc-200 dark:border-zinc-700">
                                       {marca}
                                     </span>
-                                    <span>{item.nome || item.peca_padronizada}</span>
+                                    <span>{nomeOrcamento}</span>
                                   </div>
 
-                                  {tituloReal && tituloReal !== (item.nome || item.peca_padronizada) && (
-                                    <div className="text-[11px] text-zinc-500 dark:text-zinc-400 truncate mt-0.5 max-w-md">
-                                      {tituloReal}
+                                  {tituloAnuncioML && (
+                                    <div
+                                      className="text-[11px] text-zinc-500 dark:text-zinc-400 truncate mt-0.5 max-w-md"
+                                      title={tituloAnuncioML}
+                                    >
+                                      {tituloAnuncioML}
                                     </div>
                                   )}
                                 </div>
@@ -1101,16 +1117,22 @@ TECFIL PSL55 - Filtro de Óleo (R$ 42,00)"
 
                             {/* 6. PREÇO / OFERTA MERCADO LIVRE */}
                             <td className="py-3.5 px-4 align-middle text-right font-mono">
-                              <div>
-                                <span className="font-black text-sm text-emerald-600 dark:text-emerald-400 block leading-tight">
-                                  {formatPrice(subtotalML > 0 ? subtotalML : (item.preco_estimado || 0))}
-                                </span>
-                                {qtd > 1 && precoUnitML > 0 && (
-                                  <span className="text-[10px] text-zinc-400 block">
-                                    {qtd}x de {formatPrice(precoUnitML)}
+                              {precoUnitML > 0 ? (
+                                <div>
+                                  <span className="font-black text-sm text-emerald-600 dark:text-emerald-400 block leading-tight">
+                                    {formatPrice(subtotalML)}
                                   </span>
-                                )}
-                              </div>
+                                  {qtd > 1 && (
+                                    <span className="text-[10px] text-zinc-400 block">
+                                      {qtd}x de {formatPrice(precoUnitML)}
+                                    </span>
+                                  )}
+                                </div>
+                              ) : (
+                                <span className="text-xs font-semibold text-amber-600 dark:text-amber-400">
+                                  Ver oferta no ML
+                                </span>
+                              )}
                             </td>
 
                             {/* 7. BOTÃO COMPRAR NO ML (COM AFILIADO) */}
@@ -1120,7 +1142,7 @@ TECFIL PSL55 - Filtro de Óleo (R$ 42,00)"
                                 target="_blank"
                                 rel="noopener noreferrer sponsored"
                                 className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-zinc-950 text-xs font-black transition cursor-pointer shadow-xs transform active:scale-95"
-                                title={`Comprar ${codigo || item.nome} no Mercado Livre`}
+                                title={`Comprar ${codigo || nomeOrcamento} no Mercado Livre`}
                               >
                                 <ShoppingBag className="w-3.5 h-3.5 shrink-0" />
                                 <span>Comprar no ML ↗</span>
@@ -1140,10 +1162,18 @@ TECFIL PSL55 - Filtro de Óleo (R$ 42,00)"
                   {resultado.itens.map((item, idx) => {
                     const isChecked = itensSelecionados.includes(idx);
                     const finalUrl = getItemAffiliateUrl(item);
-                    const precoNum = getNumericPrice(item);
+                    const qtd = Number(item.quantidade) || 1;
+                    const precoUnitML = getNumericPrice(item);
+                    const subtotalML = qtd * precoUnitML;
                     const precoForn = typeof item.preco_fornecedor === "number" ? item.preco_fornecedor : null;
-                    const tituloReal = item.titulo || item.titulo_anuncio || item.nome || "Peça";
-                    const imagemReal = item.imagem || item.imagem_url || item.thumbnail;
+                    const nomeOrcamento = (item.nome || item.peca_padronizada || "Peça").trim();
+                    const rawTituloML = (item.titulo_anuncio || item.titulo || "").trim();
+                    const tituloReal =
+                      item.encontrado !== false && rawTituloML.length > 0 ? rawTituloML : nomeOrcamento;
+                    const rawImg = item.thumbnail || item.imagem || item.imagem_url;
+                    const imagemReal = rawImg
+                      ? rawImg.replace(/-I\.jpg/gi, "-O.jpg").replace(/-I\.webp/gi, "-O.webp")
+                      : null;
                     const codigo = item.codigo && item.codigo !== "S/ CÓDIGO" ? item.codigo : null;
                     const marca = item.marca && item.marca !== "Original" ? item.marca : "Original";
 
@@ -1167,7 +1197,7 @@ TECFIL PSL55 - Filtro de Óleo (R$ 42,00)"
                                 className="w-4 h-4 rounded border-zinc-300 text-emerald-600 focus:ring-emerald-500 cursor-pointer accent-emerald-500 shrink-0"
                               />
                               <span className="text-xs font-bold text-zinc-900 dark:text-zinc-100 truncate">
-                                {item.nome}
+                                {nomeOrcamento}
                               </span>
                             </label>
 
@@ -1192,7 +1222,7 @@ TECFIL PSL55 - Filtro de Óleo (R$ 42,00)"
                               <div className="flex flex-col items-center justify-center text-zinc-400 gap-1.5 p-4">
                                 <Package className="w-10 h-10 opacity-30 text-amber-500" />
                                 <span className="text-[11px] text-zinc-400 text-center font-medium">
-                                  Oferta ativa no Mercado Livre
+                                  Ver disponibilidade no Mercado Livre
                                 </span>
                               </div>
                             )}
@@ -1216,7 +1246,7 @@ TECFIL PSL55 - Filtro de Óleo (R$ 42,00)"
                               <div>
                                 <span className="text-[10px] text-zinc-400 block">Fornecedor:</span>
                                 <span className="font-mono font-semibold text-zinc-500 line-through">
-                                  {formatPrice(precoForn)}
+                                  {formatPrice(precoForn * qtd)}
                                 </span>
                               </div>
                             ) : (
@@ -1231,7 +1261,7 @@ TECFIL PSL55 - Filtro de Óleo (R$ 42,00)"
                                 Mercado Livre:
                               </span>
                               <div className="text-lg font-black font-mono text-emerald-600 dark:text-emerald-400">
-                                {formatPrice(precoNum)}
+                                {subtotalML > 0 ? formatPrice(subtotalML) : "Ver no ML"}
                               </div>
                             </div>
                           </div>
