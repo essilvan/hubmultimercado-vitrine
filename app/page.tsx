@@ -40,6 +40,7 @@ export interface ProdutoCard {
     preco?: number | string | null;
     preco_antigo?: string | null;
     desconto_percentual?: string | null;
+    direct_product_url?: string | null;
     link_afiliado?: string | null;
     link_ml?: string | null;
     link_destino?: string | null;
@@ -395,10 +396,16 @@ export default function Home() {
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
             {products.map((produto) => {
-              // Determina link de afiliado oficial
+              // Determina link de afiliado direto para a página do produto
+              const rawDirectUrl =
+                (produto.especificacoes?.direct_product_url as string | undefined) ||
+                produto.link_afiliado ||
+                (produto.especificacoes?.link_afiliado as string | undefined) ||
+                (produto.especificacoes?.link_ml as string | undefined);
+
               const buyUrl =
-                produto.link_afiliado && produto.link_afiliado.trim()
-                  ? produto.link_afiliado.trim()
+                rawDirectUrl && rawDirectUrl.trim()
+                  ? rawDirectUrl.trim()
                   : `/api/redirect?query=${encodeURIComponent(
                       produto.busca_ml || `${produto.marca} ${produto.codigo_fabricante}`
                     )}`;

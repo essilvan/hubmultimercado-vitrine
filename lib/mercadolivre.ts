@@ -153,6 +153,11 @@ export function formatarLinkAfiliado(permalink: string): string {
     (typeof process !== "undefined" && (process.env.NEXT_PUBLIC_ML_MATT_WORD || process.env.ML_MATT_WORD)) ||
     "hubmultimercado";
 
+  // Se for shortlink oficial meli.la, retorna limpo sem query/hash extras
+  if (trimmed.includes("meli.la/")) {
+    return trimmed.split("?")[0].split("#")[0];
+  }
+
   // Se for click1, verifica se tem parâmetro ?url= contendo o link do produto direto
   if (trimmed.includes("click1.mercadolivre.com.br")) {
     try {
@@ -169,15 +174,19 @@ export function formatarLinkAfiliado(permalink: string): string {
     return trimmed;
   }
 
-  // Se ainda for click1 (sem innerUrl), anexa mantendo os parâmetros
-  if (trimmed.includes("click1.mercadolivre.com.br")) {
+  // Se ainda for click1 ou /social/ ou tiver pdp_filters, anexa mantendo os parâmetros essenciais
+  if (
+    trimmed.includes("click1.mercadolivre.com.br") ||
+    trimmed.includes("/social/") ||
+    trimmed.includes("pdp_filters=")
+  ) {
     const [baseWithoutHash] = trimmed.split("#");
     const sep = baseWithoutHash.includes("?") ? "&" : "?";
-    return `${baseWithoutHash}${sep}matt_tool=${mattTool}&matt_word=${mattWord}#matt_tool=${mattTool}&matt_word=${mattWord}`;
+    return `${baseWithoutHash}${sep}matt_tool=${mattTool}&matt_word=${mattWord}&forceInApp=true`;
   }
 
   const cleanBase = trimmed.split("?")[0].split("#")[0];
-  return `${cleanBase}?matt_tool=${mattTool}&matt_word=${mattWord}#matt_tool=${mattTool}&matt_word=${mattWord}`;
+  return `${cleanBase}?matt_tool=${mattTool}&matt_word=${mattWord}&forceInApp=true#matt_tool=${mattTool}&matt_word=${mattWord}`;
 }
 
 // Utilitários canônicos de slug importados e re-exportados

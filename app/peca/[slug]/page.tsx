@@ -433,8 +433,9 @@ export default async function PecaSlugPage({ params }: PageProps) {
 
   const produtosRelacionados = await getProdutosRelacionados(produto.categoria, produto.slug);
 
-  // Link de Afiliado com Parâmetros Oficiais do Mercado Livre
+  // Link de Afiliado direto para a página do produto no Mercado Livre
   const directLink =
+    (produto.especificacoes?.direct_product_url as string | undefined) ||
     produto.link_afiliado ||
     produto.especificacoes?.link_afiliado ||
     produto.especificacoes?.link_ml ||

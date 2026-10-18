@@ -114,11 +114,21 @@ function formatarLinkAfiliadoFrontend(url: string): string {
   const trimmed = url.trim();
   if (trimmed.startsWith("/")) return trimmed;
 
+  // Se for shortlink oficial meli.la, retorna sem anexar query/hash extras
+  if (trimmed.includes("meli.la/")) {
+    return trimmed.split("?")[0].split("#")[0];
+  }
+
+  // Se já contém matt_tool e matt_word, preserva o link direto do produto intacto
+  if (trimmed.includes("matt_tool=") && trimmed.includes("matt_word=")) {
+    return trimmed;
+  }
+
   const [baseWithoutHash] = trimmed.split("#");
   let baseWithQuery = baseWithoutHash;
   if (!baseWithQuery.includes("matt_tool")) {
     const sep = baseWithQuery.includes("?") ? "&" : "?";
-    baseWithQuery = `${baseWithQuery}${sep}matt_tool=${ML_TOOL}&matt_word=${ML_WORD}`;
+    baseWithQuery = `${baseWithQuery}${sep}matt_tool=${ML_TOOL}&matt_word=${ML_WORD}&forceInApp=true`;
   }
   return `${baseWithQuery}#matt_tool=${ML_TOOL}&matt_word=${ML_WORD}`;
 }
@@ -175,12 +185,11 @@ const getItemAffiliateUrl = (item: ItemOrcamento): string => {
   if (directUrl && typeof directUrl === "string" && directUrl.trim()) {
     const trimmed = directUrl.trim();
     if (trimmed.startsWith("/")) return trimmed;
-    // Se o backend já enviou com matt_tool, preserva o link diretamente
+    if (trimmed.includes("meli.la/")) return trimmed.split("?")[0].split("#")[0];
     if (trimmed.includes("matt_tool=")) return trimmed;
     return formatarLinkAfiliadoFrontend(trimmed);
   }
 
-  // Fallback que não perde o código de afiliado (sem espaços para evitar redirecionamento 301 do ML)
   const cod = item.codigo && item.codigo !== "S/ CÓDIGO" ? item.codigo : "";
   const marca = item.marca && item.marca !== "Original" ? item.marca : "";
   const termo = `${marca ? `${marca} ` : ""}${cod || item.nome || ""}`.trim();
@@ -261,10 +270,61 @@ function gerarTextoFornecedores(
   return msg;
 }
 
+function comprimirImagemParaJpegBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("Erro ao ler o arquivo de imagem."));
+    reader.onload = (ev) => {
+      const dataUrl = ev.target?.result as string;
+      if (!dataUrl) {
+        reject(new Error("Imagem vazia."));
+        return;
+      }
+      const img = new window.Image();
+      img.onerror = () => resolve(dataUrl);
+      img.onload = () => {
+        try {
+          const maxDim = 1600;
+          let width = img.width || 1200;
+          let height = img.height || 1200;
+          if (width > maxDim || height > maxDim) {
+            if (width > height) {
+              height = Math.round((height * maxDim) / width);
+              width = maxDim;
+            } else {
+              width = Math.round((width * maxDim) / height);
+              height = maxDim;
+            }
+          }
+          const canvas = document.createElement("canvas");
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext("2d");
+          if (!ctx) {
+            resolve(dataUrl);
+            return;
+          }
+          // Fundo branco para prints PNG com transparência
+          ctx.fillStyle = "#FFFFFF";
+          ctx.fillRect(0, 0, width, height);
+          ctx.drawImage(img, 0, 0, width, height);
+          const compressed = canvas.toDataURL("image/jpeg", 0.85);
+          resolve(compressed);
+        } catch {
+          resolve(dataUrl);
+        }
+      };
+      img.src = dataUrl;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
 export default function OrcamentoPage() {
   const [texto, setTexto] = useState("");
   const [imagem, setImagem] = useState<File | null>(null);
   const [imagemPreview, setImagemPreview] = useState<string | null>(null);
+  const [imagemBase64, setImagemBase64] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
 
   const [isLoading, setIsLoading] = useState(false);
@@ -281,26 +341,53 @@ export default function OrcamentoPage() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const cameraInputRef = useRef<HTMLInputElement | null>(null);
 
-  const handleFileSelect = (file: File) => {
-    if (!file.type.startsWith("image/")) {
+  const handleFileSelect = async (file: File) => {
+    const isImage =
+      file.type.startsWith("image/") ||
+      /\.(jpe?g|png|webp|heic|heif|bmp)$/i.test(file.name || "");
+    if (!isImage) {
       setErro("Por favor, selecione um arquivo de imagem válido (.jpg, .png, .webp).");
       return;
     }
     setImagem(file);
     setErro(null);
 
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      setImagemPreview(e.target?.result as string);
-    };
-    reader.readAsDataURL(file);
+    try {
+      const jpegDataUrl = await comprimirImagemParaJpegBase64(file);
+      setImagemPreview(jpegDataUrl);
+      setImagemBase64(jpegDataUrl);
+    } catch {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const res = e.target?.result as string;
+        setImagemPreview(res);
+        setImagemBase64(res);
+      };
+      reader.readAsDataURL(file);
+    }
   };
 
   const handleClearImage = () => {
     setImagem(null);
     setImagemPreview(null);
+    setImagemBase64(null);
     if (fileInputRef.current) fileInputRef.current.value = "";
     if (cameraInputRef.current) cameraInputRef.current.value = "";
+  };
+
+  const handlePaste = (e: React.ClipboardEvent) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].type.startsWith("image/")) {
+        const blob = items[i].getAsFile();
+        if (blob) {
+          e.preventDefault();
+          handleFileSelect(blob);
+          break;
+        }
+      }
+    }
   };
 
   const handleDragOver = (e: React.DragEvent) => {
@@ -323,7 +410,7 @@ export default function OrcamentoPage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
-    if (!texto.trim() && !imagem) {
+    if (!texto.trim() && !imagem && !imagemBase64) {
       setErro("Por favor, digite a lista com os códigos ou envie a foto/print do orçamento do fornecedor.");
       return;
     }
@@ -334,17 +421,20 @@ export default function OrcamentoPage() {
     setResultado(null);
 
     try {
-      const formData = new FormData();
-      if (texto.trim()) {
-        formData.append("texto", texto.trim());
-      }
-      if (imagem) {
-        formData.append("imagem", imagem);
+      let base64Final = imagemBase64;
+      if (!base64Final && imagem) {
+        base64Final = await comprimirImagemParaJpegBase64(imagem);
       }
 
       const res = await fetch("/api/orcamento", {
         method: "POST",
-        body: formData,
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          texto: texto.trim() || null,
+          imagemBase64: base64Final || null,
+        }),
       });
 
       if (!res.ok) {
@@ -552,7 +642,7 @@ export default function OrcamentoPage() {
       <main className="flex-1 max-w-5xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
         {/* Formulário Interativo de Cotação */}
         <div className="bg-white dark:bg-zinc-900 rounded-3xl border-2 border-zinc-200 dark:border-zinc-800 p-6 sm:p-8 shadow-xl relative overflow-hidden">
-          <form onSubmit={handleSubmit} className="space-y-6">
+          <form onSubmit={handleSubmit} onPaste={handlePaste} className="space-y-6">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               {/* Opção 1: Upload de Foto / Print */}
               <div className="space-y-2.5">
@@ -568,12 +658,17 @@ export default function OrcamentoPage() {
                   onDragOver={handleDragOver}
                   onDragLeave={handleDragLeave}
                   onDrop={handleDrop}
+                  onClick={() => {
+                    if (!imagemPreview) {
+                      fileInputRef.current?.click();
+                    }
+                  }}
                   className={`border-2 border-dashed rounded-2xl p-6 text-center transition-all flex flex-col items-center justify-center min-h-[220px] ${
                     isDragging
                       ? "border-amber-500 bg-amber-50 dark:bg-amber-950/20 scale-[0.99]"
                       : imagemPreview
                       ? "border-emerald-500/60 bg-emerald-50/10 dark:bg-emerald-950/10"
-                      : "border-zinc-300 dark:border-zinc-700 hover:border-amber-400 bg-zinc-50/50 dark:bg-zinc-950/50"
+                      : "border-zinc-300 dark:border-zinc-700 hover:border-amber-400 bg-zinc-50/50 dark:bg-zinc-950/50 cursor-pointer"
                   }`}
                 >
                   {imagemPreview ? (
@@ -587,7 +682,10 @@ export default function OrcamentoPage() {
                         />
                         <button
                           type="button"
-                          onClick={handleClearImage}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleClearImage();
+                          }}
                           className="absolute top-1.5 right-1.5 p-1 rounded-full bg-zinc-900/80 text-white hover:bg-red-600 transition"
                           title="Remover foto"
                         >
@@ -596,7 +694,7 @@ export default function OrcamentoPage() {
                       </div>
                       <div className="text-xs font-medium text-emerald-600 dark:text-emerald-400 flex items-center justify-center gap-1">
                         <CheckCircle2 className="w-3.5 h-3.5" />
-                        <span>Foto / Print anexado ({imagem?.name})</span>
+                        <span>Foto / Print anexado ({imagem?.name || "Imagem colada"})</span>
                       </div>
                     </div>
                   ) : (
@@ -606,7 +704,7 @@ export default function OrcamentoPage() {
                       </div>
                       <div className="space-y-1">
                         <p className="text-xs sm:text-sm font-semibold text-zinc-700 dark:text-zinc-300">
-                          Arraste o print ou clique para escolher
+                          Arraste o print, cole (Ctrl+V) ou clique para escolher
                         </p>
                         <p className="text-[11px] text-zinc-400">
                           Print do WhatsApp, tela do sistema ou papel de orçamento (JPG, PNG)
@@ -616,14 +714,20 @@ export default function OrcamentoPage() {
                       <div className="flex items-center justify-center gap-2 pt-1">
                         <button
                           type="button"
-                          onClick={() => fileInputRef.current?.click()}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            fileInputRef.current?.click();
+                          }}
                           className="px-3 py-1.5 rounded-lg text-xs font-bold bg-zinc-200 dark:bg-zinc-800 text-zinc-800 dark:text-zinc-200 hover:bg-zinc-300 dark:hover:bg-zinc-700 transition cursor-pointer"
                         >
                           Arquivo
                         </button>
                         <button
                           type="button"
-                          onClick={() => cameraInputRef.current?.click()}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            cameraInputRef.current?.click();
+                          }}
                           className="px-3 py-1.5 rounded-lg text-xs font-bold bg-amber-400 hover:bg-amber-500 text-zinc-950 transition cursor-pointer flex items-center gap-1"
                         >
                           <Camera className="w-3.5 h-3.5" />
