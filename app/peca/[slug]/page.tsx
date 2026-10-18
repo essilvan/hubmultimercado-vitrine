@@ -208,7 +208,8 @@ async function getProdutosRelacionados(categoria?: string | null, currentSlug?: 
 function extrairValorNumerico(preco: number | string | null | undefined): number {
   if (!preco) return 0;
   if (typeof preco === "number") return preco;
-  const str = String(preco).replace("R$", "").replace(/\./g, "").replace(",", ".").trim();
+  const raw = String(preco).replace("R$", "").trim();
+  const str = raw.includes(",") ? raw.replace(/\./g, "").replace(",", ".") : raw;
   const num = parseFloat(str);
   return isNaN(num) ? 0 : num;
 }
@@ -220,7 +221,8 @@ function formatarPreco(val: number | string | null | undefined): string {
   if (!val) return "";
   const str = String(val).trim();
   if (str.startsWith("R$")) return str.replace(/\u00a0/g, " ");
-  const num = typeof val === "number" ? val : parseFloat(str.replace(/\./g, "").replace(",", "."));
+  const normalized = str.includes(",") ? str.replace(/\./g, "").replace(",", ".") : str;
+  const num = typeof val === "number" ? val : parseFloat(normalized);
   if (isNaN(num)) return str;
   return num.toLocaleString("pt-BR", { style: "currency", currency: "BRL" }).replace(/\u00a0/g, " ");
 }
@@ -444,8 +446,9 @@ export default async function PecaSlugPage({ params }: PageProps) {
         produto.busca_ml || `${produto.marca} ${produto.codigo_fabricante}`
       )}`;
 
-  const precoNumerico = extrairValorNumerico(produto.preco_estimado);
-  const precoExibicao = formatarPreco(produto.preco_estimado);
+  const precoBruto = produto.preco_estimado || produto.especificacoes?.preco;
+  const precoNumerico = extrairValorNumerico(precoBruto);
+  const precoExibicao = formatarPreco(precoBruto);
   const precoAntigoExibicao = formatarPreco(
     produto.preco_antigo || produto.especificacoes?.preco_antigo
   );
@@ -1164,9 +1167,9 @@ export default async function PecaSlugPage({ params }: PageProps) {
                   <h3 className="text-xs font-semibold text-zinc-800 dark:text-zinc-200 line-clamp-2 mt-1 mb-2">
                     {item.titulo}
                   </h3>
-                  {item.preco_estimado && (
+                  {(item.preco_estimado || item.especificacoes?.preco) && (
                     <span className="text-sm font-bold text-emerald-600 dark:text-emerald-400 mt-auto">
-                      {formatarPreco(item.preco_estimado)}
+                      {formatarPreco(item.preco_estimado || item.especificacoes?.preco)}
                     </span>
                   )}
                 </Link>

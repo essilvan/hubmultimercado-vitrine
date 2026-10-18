@@ -123,15 +123,20 @@ function formatarLinkAfiliadoFrontend(url: string): string {
   return `${baseWithQuery}#matt_tool=${ML_TOOL}&matt_word=${ML_WORD}`;
 }
 
+const parseCurrencyNumber = (val: unknown): number => {
+  if (val === null || val === undefined || val === "") return 0;
+  if (typeof val === "number") return isNaN(val) || val <= 0 ? 0 : val;
+  const str = String(val).replace(/R\$/gi, "").trim();
+  const normalized = str.includes(",")
+    ? str.replace(/\./g, "").replace(",", ".").replace(/[^0-9.]/g, "")
+    : str.replace(/[^0-9.]/g, "");
+  const num = parseFloat(normalized);
+  return isNaN(num) || num <= 0 ? 0 : num;
+};
+
 const formatPrice = (val: any, fallback?: any): string => {
-  let num: number;
-  if (typeof val === "number") {
-    num = val;
-  } else {
-    const cleaned = String(val ?? "").replace(/[^0-9.,]/g, "").replace(",", ".");
-    num = parseFloat(cleaned);
-  }
-  if (isNaN(num) || num <= 0) {
+  const num = parseCurrencyNumber(val);
+  if (num <= 0) {
     if (fallback) return formatPrice(fallback);
     return "R$ 0,00";
   }
@@ -140,18 +145,20 @@ const formatPrice = (val: any, fallback?: any): string => {
 
 const getNumericPrice = (item: ItemOrcamento | undefined | null): number => {
   if (!item) return 0;
-  const val =
-    item.preco_ml ??
-    item.preco ??
-    item.price ??
-    item.valor ??
-    item.preco_estimado;
-
-  if (val === null || val === undefined || val === "") return 0;
-  if (typeof val === "number") return isNaN(val) || val <= 0 ? 0 : val;
-  const cleaned = String(val).replace(/[^0-9.,]/g, "").replace(",", ".");
-  const num = parseFloat(cleaned);
-  return isNaN(num) || num <= 0 ? 0 : num;
+  const candidates = [
+    item.preco_ml,
+    item.preco,
+    item.price,
+    item.valor,
+    item.preco_estimado,
+    item.preco_real_ml,
+    item.preco_formatado,
+  ];
+  for (const c of candidates) {
+    const n = parseCurrencyNumber(c);
+    if (n > 0) return n;
+  }
+  return 0;
 };
 
 const getItemAffiliateUrl = (item: ItemOrcamento): string => {

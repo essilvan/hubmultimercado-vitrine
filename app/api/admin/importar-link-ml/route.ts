@@ -195,22 +195,128 @@ function parseAriaPrice(str: string | null | undefined): string | null {
   if (!str) return null;
   const match = str.match(/(\d+)\s*reais(?:\s*com\s*(\d+)\s*centavos)?/i);
   if (!match) return null;
-  const fracao = match[1];
+  const fracao = Number(match[1]).toLocaleString("pt-BR");
   const centavos = match[2] ? match[2].padStart(2, "0") : "00";
   return `R$ ${fracao},${centavos}`;
 }
 
 /**
- * Extrator de preços com prioridade para JSON-LD (offers.price) e container ui-pdp-price__second-line
+ * Extrator de preços com isolamento do Card 0 em landing pages sociais (meli.la)
+ * e prioridade para JSON-LD (offers.price) e container ui-pdp-price__second-line em PDPs
  */
-function extrairPrecosMercadoLivre(html: string): {
+function extrairPrecosMercadoLivre(
+  html: string,
+  finalUrl?: string
+): {
   precoEstimado: string | null;
   precoAntigo: string | null;
   descontoPercentual: string | null;
 } {
+  if (
+    !html ||
+    finalUrl?.includes("/social/hubmultimercado/lists") ||
+    finalUrl?.includes("account-verification") ||
+    html.includes("Minhas listas de recomendações") ||
+    html.includes("suspicious-traffic")
+  ) {
+    return {
+      precoEstimado: null,
+      precoAntigo: null,
+      descontoPercentual: null,
+    };
+  }
+
   let precoEstimadoStr: string | null = null;
   let precoAntigoStr: string | null = null;
   let descontoPercentual: string | null = null;
+
+  // 0. Landing pages sociais (meli.la -> /social/...): extrai EXCLUSIVAMENTE do primeiro poly-card (Card 0)
+  const firstCardMatch = html.match(
+    /class=["'][^"']*poly-card[^"']*["'][^>]*>([\s\S]{0,4000})/i
+  );
+  if (firstCardMatch && firstCardMatch[1]) {
+    const card0 = firstCardMatch[1];
+
+    const curBlock =
+      card0.match(
+        /class=["'][^"']*poly-price__current[^"']*["'][^>]*>([\s\S]{0,1000})/i
+      )?.[1] || "";
+    const curFrac = curBlock.match(
+      /class=["'][^"']*andes-money-amount__fraction[^"']*["'][^>]*>([0-9.]+)<\/span>/i
+    )?.[1];
+    const curCents = curBlock.match(
+      /class=["'][^"']*andes-money-amount__cents[^"']*["'][^>]*>([0-9]{2})<\/span>/i
+    )?.[1];
+
+    if (curFrac) {
+      const numFrac = Number(curFrac.replace(/\./g, "")).toLocaleString("pt-BR");
+      precoEstimadoStr = `R$ ${numFrac},${curCents ? curCents.trim() : "00"}`;
+    } else {
+      const agoraAria = curBlock.match(
+        /aria-label=["'](?:Agora:\s*)?([^"']*reais[^"']*)["']/i
+      )?.[1];
+      if (agoraAria) {
+        precoEstimadoStr = parseAriaPrice(agoraAria);
+      }
+    }
+
+    const prevBlock =
+      card0.match(
+        /<s[^>]*andes-money-amount--previous[^>]*>([\s\S]{0,800}?)<\/s>/i
+      )?.[1] || "";
+    const prevFrac = prevBlock.match(
+      /class=["'][^"']*andes-money-amount__fraction[^"']*["'][^>]*>([0-9.]+)<\/span>/i
+    )?.[1];
+    const prevCents = prevBlock.match(
+      /class=["'][^"']*andes-money-amount__cents[^"']*["'][^>]*>([0-9]{2})<\/span>/i
+    )?.[1];
+
+    if (prevFrac) {
+      const numPrevFrac = Number(prevFrac.replace(/\./g, "")).toLocaleString("pt-BR");
+      precoAntigoStr = `R$ ${numPrevFrac},${prevCents ? prevCents.trim() : "00"}`;
+    } else {
+      const antesAria = prevBlock.match(/aria-label=["']Antes:\s*([^"']+)["']/i)?.[1];
+      if (antesAria) {
+        precoAntigoStr = parseAriaPrice(antesAria);
+      }
+    }
+
+    const discM = curBlock.match(
+      /class=["'][^"']*andes-money-amount__discount[^"']*["'][^>]*>([^<]*[0-9]{1,2}%\s*OFF[^<]*)<\/span>/i
+    )?.[1];
+    if (discM) {
+      descontoPercentual = discM.trim().toUpperCase();
+    }
+
+    if (precoEstimadoStr) {
+      if (precoAntigoStr && precoAntigoStr === precoEstimadoStr) {
+        precoAntigoStr = null;
+      }
+      if (!descontoPercentual && precoAntigoStr) {
+        const numAntigo = parseFloat(
+          precoAntigoStr.replace("R$", "").replace(/\./g, "").replace(",", ".").trim()
+        );
+        const numEstimado = parseFloat(
+          precoEstimadoStr.replace("R$", "").replace(/\./g, "").replace(",", ".").trim()
+        );
+        if (!isNaN(numAntigo) && !isNaN(numEstimado) && numAntigo > numEstimado) {
+          const pct = Math.round(((numAntigo - numEstimado) / numAntigo) * 100);
+          if (pct >= 5) {
+            descontoPercentual = `${pct}% OFF`;
+          }
+        }
+      }
+      if (!precoAntigoStr) {
+        descontoPercentual = null;
+      }
+
+      return {
+        precoEstimado: precoEstimadoStr,
+        precoAntigo: precoAntigoStr,
+        descontoPercentual,
+      };
+    }
+  }
 
   // 1. JSON-LD: prioridade máxima para offers.price ou offers[0].price (preço promocional final)
   try {
@@ -231,15 +337,13 @@ function extrairPrecosMercadoLivre(html: string): {
             if (Array.isArray(offers) && offers.length > 0) {
               const p = offers[0].price !== undefined ? parseFloat(String(offers[0].price)) : null;
               if (p !== null && !isNaN(p) && p > 0) {
-                const parts = p.toFixed(2).split(".");
-                precoEstimadoStr = `R$ ${parts[0]},${parts[1]}`;
+                precoEstimadoStr = formatBrl(p);
                 break;
               }
             } else if (typeof offers === "object") {
               const p = offers.price !== undefined ? parseFloat(String(offers.price)) : null;
               if (p !== null && !isNaN(p) && p > 0) {
-                const parts = p.toFixed(2).split(".");
-                precoEstimadoStr = `R$ ${parts[0]},${parts[1]}`;
+                precoEstimadoStr = formatBrl(p);
                 break;
               }
             }
@@ -266,9 +370,8 @@ function extrairPrecosMercadoLivre(html: string): {
     );
 
     if (fracMatch && fracMatch[1]) {
-      const fracao = fracMatch[1].replace(/\./g, "").trim();
+      const fracao = Number(fracMatch[1].replace(/\./g, "").trim()).toLocaleString("pt-BR");
       const centavos = centsMatch && centsMatch[1] ? centsMatch[1].trim() : "00";
-      // Dá prioridade ao container visual da página
       precoEstimadoStr = `R$ ${fracao},${centavos}`;
     }
   }
@@ -285,38 +388,21 @@ function extrairPrecosMercadoLivre(html: string): {
     );
 
     if (origFracMatch && origFracMatch[1]) {
-      const origFrac = origFracMatch[1].replace(/\./g, "").trim();
+      const origFrac = Number(origFracMatch[1].replace(/\./g, "").trim()).toLocaleString("pt-BR");
       const origCents = origCentsMatch && origCentsMatch[1] ? origCentsMatch[1].trim() : "00";
       precoAntigoStr = `R$ ${origFrac},${origCents}`;
     }
   }
 
-  // 4. Suporte para landing pages de afiliados / sociais via aria-label ("Agora: XX reais" e "Antes: YY reais")
-  if (!precoEstimadoStr) {
-    const agoraMatch = html.match(/aria-label=["']Agora:\s*([^"']+)["']/i);
-    if (agoraMatch) {
-      precoEstimadoStr = parseAriaPrice(agoraMatch[1]);
-    }
-  }
-
-  if (!precoAntigoStr) {
-    const antesMatch = html.match(/aria-label=["']Antes:\s*([^"']+)["']/i);
-    if (antesMatch) {
-      precoAntigoStr = parseAriaPrice(antesMatch[1]);
-    }
-  }
-
-  // 5. Percentagem de Desconto: '.andes-money-amount__discount', '.ui-pdp-price__second-line__label' ou regex "XX% OFF"
+  // 4. Percentagem de Desconto em PDP
   const discountMatch =
     html.match(/class=["'][^"']*(?:andes-money-amount__discount|ui-pdp-price__second-line__label)[^"']*["'][^>]*>([^<]*[0-9]{1,2}%\s*OFF[^<]*)<\/span>/i) ||
-    html.match(/<span[^>]*class=["'][^"']*andes-money-amount__discount[^"']*["'][^>]*>([0-9]{1,2}%\s*OFF)<\/span>/i) ||
-    html.match(/\b([0-9]{1,2}%\s*OFF)\b/i);
+    html.match(/<span[^>]*class=["'][^"']*andes-money-amount__discount[^"']*["'][^>]*>([0-9]{1,2}%\s*OFF)<\/span>/i);
 
   if (discountMatch && discountMatch[1]) {
     descontoPercentual = discountMatch[1].trim().toUpperCase();
   }
 
-  // Se não localizou o desconto textual mas temos preço antigo e preço estimado, calcula
   if (!descontoPercentual && precoAntigoStr && precoEstimadoStr) {
     const numAntigo = parseFloat(precoAntigoStr.replace("R$", "").replace(/\./g, "").replace(",", ".").trim());
     const numEstimado = parseFloat(precoEstimadoStr.replace("R$", "").replace(/\./g, "").replace(",", ".").trim());
@@ -344,6 +430,9 @@ function extrairPrecosMercadoLivre(html: string): {
   // Validação: Preço antigo não deve ser igual ao preço estimado
   if (precoAntigoStr && precoEstimadoStr && precoAntigoStr === precoEstimadoStr) {
     precoAntigoStr = null;
+  }
+  if (!precoAntigoStr) {
+    descontoPercentual = null;
   }
 
   return {
@@ -669,7 +758,10 @@ export async function POST(request: NextRequest) {
     }
 
     // 6. Extração de Preços (Atual promocional, Original e Desconto)
-    const { precoEstimado, precoAntigo, descontoPercentual } = extrairPrecosMercadoLivre(pdpHtml.includes("<tr") ? pdpHtml : html);
+    const { precoEstimado, precoAntigo, descontoPercentual } = extrairPrecosMercadoLivre(
+      pdpHtml.includes("<tr") ? pdpHtml : html,
+      finalUrl
+    );
 
     let precoEstimadoFormatado = precoEstimado;
     if (!precoEstimadoFormatado && itemApi?.price && itemApi.price > 0) {

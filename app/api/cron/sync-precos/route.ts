@@ -57,19 +57,125 @@ function parseAriaPrice(str: string | null | undefined): string | null {
   if (!str) return null;
   const match = str.match(/(\d+)\s*reais(?:\s*com\s*(\d+)\s*centavos)?/i);
   if (!match) return null;
-  const fracao = match[1];
+  const fracao = Number(match[1]).toLocaleString("pt-BR");
   const centavos = match[2] ? match[2].padStart(2, "0") : "00";
   return `R$ ${fracao},${centavos}`;
 }
 
-function extrairPrecosMercadoLivre(html: string): {
+export function extrairPrecosMercadoLivre(
+  html: string,
+  finalUrl?: string
+): {
   precoEstimado: string | null;
   precoAntigo: string | null;
   descontoPercentual: string | null;
 } {
+  if (
+    !html ||
+    finalUrl?.includes("/social/hubmultimercado/lists") ||
+    finalUrl?.includes("account-verification") ||
+    html.includes("Minhas listas de recomendações") ||
+    html.includes("suspicious-traffic")
+  ) {
+    return {
+      precoEstimado: null,
+      precoAntigo: null,
+      descontoPercentual: null,
+    };
+  }
+
   let precoEstimadoStr: string | null = null;
   let precoAntigoStr: string | null = null;
   let descontoPercentual: string | null = null;
+
+  // 0. Se for landing page social de afiliado (meli.la -> /social/...), extrai EXCLUSIVAMENTE do primeiro poly-card (Card 0 = produto principal),
+  // impedindo que recomendações abaixo na página contaminem o preço ou o desconto.
+  const firstCardMatch = html.match(
+    /class=["'][^"']*poly-card[^"']*["'][^>]*>([\s\S]{0,4000})/i
+  );
+  if (firstCardMatch && firstCardMatch[1]) {
+    const card0 = firstCardMatch[1];
+
+    const curBlock =
+      card0.match(
+        /class=["'][^"']*poly-price__current[^"']*["'][^>]*>([\s\S]{0,1000})/i
+      )?.[1] || "";
+    const curFrac = curBlock.match(
+      /class=["'][^"']*andes-money-amount__fraction[^"']*["'][^>]*>([0-9.]+)<\/span>/i
+    )?.[1];
+    const curCents = curBlock.match(
+      /class=["'][^"']*andes-money-amount__cents[^"']*["'][^>]*>([0-9]{2})<\/span>/i
+    )?.[1];
+
+    if (curFrac) {
+      const numFrac = Number(curFrac.replace(/\./g, "")).toLocaleString("pt-BR");
+      precoEstimadoStr = `R$ ${numFrac},${curCents ? curCents.trim() : "00"}`;
+    } else {
+      const agoraAria = curBlock.match(
+        /aria-label=["'](?:Agora:\s*)?([^"']*reais[^"']*)["']/i
+      )?.[1];
+      if (agoraAria) {
+        precoEstimadoStr = parseAriaPrice(agoraAria);
+      }
+    }
+
+    const prevBlock =
+      card0.match(
+        /<s[^>]*andes-money-amount--previous[^>]*>([\s\S]{0,800}?)<\/s>/i
+      )?.[1] || "";
+    const prevFrac = prevBlock.match(
+      /class=["'][^"']*andes-money-amount__fraction[^"']*["'][^>]*>([0-9.]+)<\/span>/i
+    )?.[1];
+    const prevCents = prevBlock.match(
+      /class=["'][^"']*andes-money-amount__cents[^"']*["'][^>]*>([0-9]{2})<\/span>/i
+    )?.[1];
+
+    if (prevFrac) {
+      const numPrevFrac = Number(prevFrac.replace(/\./g, "")).toLocaleString("pt-BR");
+      precoAntigoStr = `R$ ${numPrevFrac},${prevCents ? prevCents.trim() : "00"}`;
+    } else {
+      const antesAria = prevBlock.match(/aria-label=["']Antes:\s*([^"']+)["']/i)?.[1];
+      if (antesAria) {
+        precoAntigoStr = parseAriaPrice(antesAria);
+      }
+    }
+
+    const discM = curBlock.match(
+      /class=["'][^"']*andes-money-amount__discount[^"']*["'][^>]*>([^<]*[0-9]{1,2}%\s*OFF[^<]*)<\/span>/i
+    )?.[1];
+    if (discM) {
+      descontoPercentual = discM.trim().toUpperCase();
+    }
+
+    if (precoEstimadoStr) {
+      if (precoAntigoStr && precoAntigoStr === precoEstimadoStr) {
+        precoAntigoStr = null;
+      }
+      if (!descontoPercentual && precoAntigoStr) {
+        const numAntigo = parseFloat(
+          precoAntigoStr.replace("R$", "").replace(/\./g, "").replace(",", ".").trim()
+        );
+        const numEstimado = parseFloat(
+          precoEstimadoStr.replace("R$", "").replace(/\./g, "").replace(",", ".").trim()
+        );
+        if (!isNaN(numAntigo) && !isNaN(numEstimado) && numAntigo > numEstimado) {
+          const pct = Math.round(((numAntigo - numEstimado) / numAntigo) * 100);
+          if (pct >= 5) {
+            descontoPercentual = `${pct}% OFF`;
+          }
+        }
+      }
+      if (!precoAntigoStr) {
+        descontoPercentual = null;
+      }
+
+      return {
+        precoEstimado: precoEstimadoStr,
+        precoAntigo: precoAntigoStr,
+        descontoPercentual,
+      };
+    }
+  }
 
   // 1. JSON-LD: prioridade para offers.price ou offers[0].price
   try {
@@ -90,15 +196,13 @@ function extrairPrecosMercadoLivre(html: string): {
             if (Array.isArray(offers) && offers.length > 0) {
               const p = offers[0].price !== undefined ? parseFloat(String(offers[0].price)) : null;
               if (p !== null && !isNaN(p) && p > 0) {
-                const parts = p.toFixed(2).split(".");
-                precoEstimadoStr = `R$ ${parts[0]},${parts[1]}`;
+                precoEstimadoStr = formatBrl(p);
                 break;
               }
             } else if (typeof offers === "object") {
               const p = offers.price !== undefined ? parseFloat(String(offers.price)) : null;
               if (p !== null && !isNaN(p) && p > 0) {
-                const parts = p.toFixed(2).split(".");
-                precoEstimadoStr = `R$ ${parts[0]},${parts[1]}`;
+                precoEstimadoStr = formatBrl(p);
                 break;
               }
             }
@@ -125,7 +229,7 @@ function extrairPrecosMercadoLivre(html: string): {
     );
 
     if (fracMatch && fracMatch[1]) {
-      const fracao = fracMatch[1].replace(/\./g, "").trim();
+      const fracao = Number(fracMatch[1].replace(/\./g, "").trim()).toLocaleString("pt-BR");
       const centavos = centsMatch && centsMatch[1] ? centsMatch[1].trim() : "00";
       precoEstimadoStr = `R$ ${fracao},${centavos}`;
     }
@@ -143,32 +247,16 @@ function extrairPrecosMercadoLivre(html: string): {
     );
 
     if (origFracMatch && origFracMatch[1]) {
-      const origFrac = origFracMatch[1].replace(/\./g, "").trim();
+      const origFrac = Number(origFracMatch[1].replace(/\./g, "").trim()).toLocaleString("pt-BR");
       const origCents = origCentsMatch && origCentsMatch[1] ? origCentsMatch[1].trim() : "00";
       precoAntigoStr = `R$ ${origFrac},${origCents}`;
     }
   }
 
-  // 4. Suporte para landing pages de afiliados via aria-label ("Agora: XX reais" e "Antes: YY reais")
-  if (!precoEstimadoStr) {
-    const agoraMatch = html.match(/aria-label=["']Agora:\s*([^"']+)["']/i);
-    if (agoraMatch) {
-      precoEstimadoStr = parseAriaPrice(agoraMatch[1]);
-    }
-  }
-
-  if (!precoAntigoStr) {
-    const antesMatch = html.match(/aria-label=["']Antes:\s*([^"']+)["']/i);
-    if (antesMatch) {
-      precoAntigoStr = parseAriaPrice(antesMatch[1]);
-    }
-  }
-
-  // 5. Percentagem de Desconto: '.andes-money-amount__discount', '.ui-pdp-price__second-line__label' ou regex "XX% OFF"
+  // 4. Percentagem de Desconto em PDP padrão
   const discountMatch =
     html.match(/class=["'][^"']*(?:andes-money-amount__discount|ui-pdp-price__second-line__label)[^"']*["'][^>]*>([^<]*[0-9]{1,2}%\s*OFF[^<]*)<\/span>/i) ||
-    html.match(/<span[^>]*class=["'][^"']*andes-money-amount__discount[^"']*["'][^>]*>([0-9]{1,2}%\s*OFF)<\/span>/i) ||
-    html.match(/\b([0-9]{1,2}%\s*OFF)\b/i);
+    html.match(/<span[^>]*class=["'][^"']*andes-money-amount__discount[^"']*["'][^>]*>([0-9]{1,2}%\s*OFF)<\/span>/i);
 
   if (discountMatch && discountMatch[1]) {
     descontoPercentual = discountMatch[1].trim().toUpperCase();
@@ -185,7 +273,7 @@ function extrairPrecosMercadoLivre(html: string): {
     }
   }
 
-  // Fallbacks de preço atual
+  // Fallbacks de preço atual via meta tag
   if (!precoEstimadoStr) {
     const metaPriceMatch =
       html.match(/<meta[^>]+itemprop=["']price["'][^>]+content=["']([^"']+)["']/i) ||
@@ -201,6 +289,9 @@ function extrairPrecosMercadoLivre(html: string): {
   if (precoAntigoStr && precoEstimadoStr && precoAntigoStr === precoEstimadoStr) {
     precoAntigoStr = null;
   }
+  if (!precoAntigoStr) {
+    descontoPercentual = null;
+  }
 
   return {
     precoEstimado: precoEstimadoStr,
@@ -209,8 +300,30 @@ function extrairPrecosMercadoLivre(html: string): {
   };
 }
 
-async function fetchPageHtml(url: string): Promise<string | null> {
-  // 1. Tenta fetch com User-Agent de navegador
+async function fetchPageHtml(url: string): Promise<{ html: string | null; finalUrl: string }> {
+  // 1. Tenta fetch com User-Agent de preview social (evita bloqueios de account-verification em meli.la)
+  try {
+    const botRes = await fetch(url, {
+      redirect: "follow",
+      headers: {
+        "User-Agent":
+          "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+        Accept:
+          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "pt-BR,pt;q=0.9",
+      },
+    });
+    if (botRes.ok) {
+      const text = await botRes.text();
+      if (!botRes.url.includes("account-verification") && !text.includes("suspicious-traffic")) {
+        return { html: text, finalUrl: botRes.url || url };
+      }
+    }
+  } catch (err) {
+    console.warn("Fetch bot falhou, tentando navegador:", err);
+  }
+
+  // 2. Fallback com User-Agent de navegador
   try {
     const res = await fetch(url, {
       redirect: "follow",
@@ -226,33 +339,14 @@ async function fetchPageHtml(url: string): Promise<string | null> {
     if (res.ok) {
       const text = await res.text();
       if (!res.url.includes("account-verification") && !text.includes("suspicious-traffic")) {
-        return text;
+        return { html: text, finalUrl: res.url || url };
       }
     }
   } catch (err) {
-    console.warn("Fetch navegador falhou, tentando fallback social bot:", err);
+    console.warn("Fetch navegador também falhou:", err);
   }
 
-  // 2. Fallback com User-Agent de preview social para contornar bloqueios de bots
-  try {
-    const botRes = await fetch(url, {
-      redirect: "follow",
-      headers: {
-        "User-Agent":
-          "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
-        Accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "pt-BR,pt;q=0.9",
-      },
-    });
-    if (botRes.ok) {
-      return await botRes.text();
-    }
-  } catch (err) {
-    console.warn("Fallback bot também falhou:", err);
-  }
-
-  return null;
+  return { html: null, finalUrl: url };
 }
 
 export async function handleSync(request: NextRequest) {
@@ -305,20 +399,21 @@ export async function handleSync(request: NextRequest) {
       prod.especificacoes?.link_destino;
 
     try {
-      const html = await fetchPageHtml(link);
+      const { html, finalUrl } = await fetchPageHtml(link);
       if (!html) {
         throw new Error("Não foi possível carregar o HTML da página do anúncio.");
       }
 
-      const { precoEstimado, precoAntigo, descontoPercentual } = extrairPrecosMercadoLivre(html);
+      const { precoEstimado, precoAntigo, descontoPercentual } = extrairPrecosMercadoLivre(html, finalUrl);
 
       if (!precoEstimado) {
-        throw new Error("Preço não localizado na página do anúncio.");
+        throw new Error("Preço não localizado na página do anúncio (ou lista expirada).");
       }
 
-      // Prepara os dados de atualização
+      // Prepara os dados de atualização sincronizando também especificacoes.preco
       const updatedSpecs = {
         ...(typeof prod.especificacoes === "object" && prod.especificacoes ? prod.especificacoes : {}),
+        preco: precoEstimado,
         preco_antigo: precoAntigo,
         desconto_percentual: descontoPercentual,
         ultima_sincronizacao: nowIso,

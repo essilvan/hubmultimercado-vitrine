@@ -54,17 +54,24 @@ export async function POST(request: NextRequest) {
       updatePayload.imagem_url = imagem_url;
     }
 
+    const nextSpecs: Record<string, unknown> = { ...existingSpecs };
+    let specsChanged = false;
+
     if (link_ml !== undefined) {
       const cleanLink = typeof link_ml === "string" ? link_ml.trim() : "";
-      updatePayload.especificacoes = {
-        ...existingSpecs,
-        link_ml: cleanLink,
-        link_destino: cleanLink,
-      };
+      nextSpecs.link_ml = cleanLink;
+      nextSpecs.link_destino = cleanLink;
+      specsChanged = true;
     }
 
     if (preco_estimado !== undefined) {
       updatePayload.preco_estimado = preco_estimado;
+      nextSpecs.preco = preco_estimado;
+      specsChanged = true;
+    }
+
+    if (specsChanged) {
+      updatePayload.especificacoes = nextSpecs;
     }
 
     if (titulo !== undefined) {

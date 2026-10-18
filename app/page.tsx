@@ -36,6 +36,14 @@ export interface ProdutoCard {
   desconto_percentual?: string | null;
   imagem_url?: string | null;
   link_afiliado?: string | null;
+  especificacoes?: {
+    preco?: number | string | null;
+    preco_antigo?: string | null;
+    desconto_percentual?: string | null;
+    link_afiliado?: string | null;
+    link_ml?: string | null;
+    link_destino?: string | null;
+  } | null;
   created_at?: string;
 }
 
@@ -45,7 +53,10 @@ function formatPriceDisplay(value: number | string | null | undefined): string {
   if (value === null || value === undefined || value === "") return "";
   const str = String(value).trim();
   if (str.startsWith("R$")) return str.replace(/\u00a0/g, " ");
-  const num = typeof value === "number" ? value : parseFloat(str.replace(/\./g, "").replace(",", "."));
+  const normalized = str.includes(",")
+    ? str.replace(/\./g, "").replace(",", ".")
+    : str;
+  const num = typeof value === "number" ? value : parseFloat(normalized);
   if (isNaN(num)) return str;
   return num.toLocaleString("pt-BR", {
     style: "currency",
@@ -111,7 +122,7 @@ export default function Home() {
       let query = supabase
         .from("produtos_afiliados")
         .select(
-          "id, titulo, slug, codigo_fabricante, marca, categoria, veiculos_compativeis, codigo_oem, busca_ml, preco_estimado, preco_antigo, desconto_percentual, imagem_url, link_afiliado, created_at",
+          "id, titulo, slug, codigo_fabricante, marca, categoria, veiculos_compativeis, codigo_oem, busca_ml, preco_estimado, preco_antigo, desconto_percentual, imagem_url, link_afiliado, especificacoes, created_at",
           { count: "exact" }
         )
         .order("created_at", { ascending: false })
@@ -393,9 +404,16 @@ export default function Home() {
                     )}`;
 
               // Extração de valores de preço
-              const precoAtual = formatPriceDisplay(produto.preco_estimado);
-              const precoAntigo = produto.preco_antigo ? formatPriceDisplay(produto.preco_antigo) : null;
-              const descontoPercentual = produto.desconto_percentual || null;
+              const precoAtual = formatPriceDisplay(
+                produto.preco_estimado || produto.especificacoes?.preco
+              );
+              const rawPrecoAntigo =
+                produto.preco_antigo || produto.especificacoes?.preco_antigo;
+              const precoAntigo = rawPrecoAntigo ? formatPriceDisplay(rawPrecoAntigo) : null;
+              const descontoPercentual =
+                produto.desconto_percentual ||
+                produto.especificacoes?.desconto_percentual ||
+                null;
 
               return (
                 <div
