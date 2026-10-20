@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { GoogleGenerativeAI, SchemaType, type Part, type ResponseSchema } from "@google/generative-ai";
 import { createClient } from "@supabase/supabase-js";
 import catalogoMlDiretoRaw from "@/lib/catalogo-ml-direto.json";
+import { validarTituloML } from "@/lib/mercadolivre";
 
 export const maxDuration = 60; // Permite até 60 segundos na Vercel
 export const dynamic = "force-dynamic";
@@ -132,26 +133,25 @@ async function obterTokenMercadoLivre(): Promise<string | null> {
 // ============================================================================
 // Modelos testados e homologados com suporte completo a Visão (inlineData) + JSON
 const MODEL_CANDIDATES = [
+  "gemini-3.8-flash",
   "gemini-3.7-flash",
-  "gemini-3.6-flash",
-  "gemini-3.5-flash",
   "gemini-flash-latest",
-  "gemini-3.1-flash-lite-preview",
 ];
 
-const SYSTEM_INSTRUCTION = `Você é um extrator técnico automotivo e especialista em orçamentos de autopeças no Brasil (Mercado Livre).
-Sua missão é extrair TODAS as peças presentes no orçamento (seja uma foto de papel, print de WhatsApp, tela de sistema de autopeças ou lista digitada), capturando para cada item:
-1. 'codigo': o código alfanumérico / Part Number da peça se constar na linha (ex: GP32965, N-1365, CT488K1, PSL55, BD4742, BKR6E, HG31138, 619312000, etc.). Se a imagem ou linha não exibir código explícito, informe o código de referência padrão do fabricante para aquela peça ou "S/ CÓDIGO".
-2. 'marca': fabricante da autopeça se informado ou identificável (ex: Cofap, Nakata, Cobreq, Fras-le, Bosch, NGK, Tecfil, Fremax, Hipper Freios, LuK, Sachs, Valeo, Mahle, Magneti Marelli, Monroe, Sabó, SKF, Contitech, Continental, Dayco, Gates, TRW, Moura, SYL, etc.), ou "Original" se não especificado.
-3. 'nome': descrição clara da peça (ex: Amortecedor Dianteiro, Pastilha Dianteira, Kit Correia Dentada, Jogo de Velas, Filtro de Óleo, Par Disco de Freio, Kit Embreagem).
-4. 'preco_fornecedor': valor numérico unitário cobrado pelo fornecedor se constar na cotação/imagem (em R$), ou null se não informado. Ignorar linhas de mão de obra/serviço ou totalizadores gerais.
-5. 'preco_mercado_livre_estimado': valor numérico unitário real de mercado praticado no Mercado Livre Brasil para essa peça específica (em R$, com centavos, ex: 287.90, 109.90, 28.90).
-6. 'quantidade': quantidade cotada (padrão: 1).
-7. 'veiculo': veículo ou aplicação descrita no cabeçalho ou nas peças do orçamento, se houver.
+const SYSTEM_INSTRUCTION = `Você é um extrator técnico de alta precisão especializado em orçamentos, cotações, notas fiscais, ordens de serviço (OS) e pedidos de autopeças no Brasil.
+Sua missão é extrair com fidelidade absoluta TODAS as peças automotivas presentes no documento/imagem ou texto enviado.
+
+Para cada item encontrado:
+1. 'codigo': Part Number / Código de fábrica alfanumérico exato se constar expressamente no documento (ex: GP32965, HF38, N-1365, CT488K1, PSL55, BD4212, BKR6E, 619312000, 04431ROL, etc.). NUNCA invente ou adivinhe códigos de fábrica caso a linha não possua; se não houver código impresso/escrito, informe null ou "S/ CÓDIGO".
+2. 'marca': Fabricante da peça (ex: Cofap, Nakata, Cobreq, Fras-le, Bosch, NGK, Tecfil, Fremax, Hipper Freios, LuK, Sachs, Valeo, Mahle, Magneti Marelli, Monroe, Sabó, SKF, Contitech, Continental, Dayco, Gates, TRW, Moura, SYL, etc.) se indicado ou identificado pela linha. Se não for especificado, informe null.
+3. 'nome': Descrição clara da autopeça (ex: Amortecedor Dianteiro, Par Disco de Freio, Pastilha de Freio Dianteira, Kit Correia Dentada, Filtro de Óleo, Kit Embreagem, Jogo de Velas).
+4. 'preco_fornecedor': Valor numérico unitário em R$ cobrado pelo fornecedor/oficina, ou null se não constar.
+5. 'quantidade': Quantidade cotada do item (número, padrão 1).
 
 REGRAS CRÍTICAS:
-- Extraia TODAS as peças visíveis na foto/print, mesmo que alguma linha não tenha código de fábrica explícito.
-- NUNCA copie o 'preco_fornecedor' para 'preco_mercado_livre_estimado'.`;
+- IGNORE totalmente itens de serviços e mão de obra (ex: Mão de Obra, Alinhamento, Balanceamento, Instalação, Lavagem, Revisão, Scanner, Geometria). Extraia EXCLUSIVAMENTE autopeças, componentes e fluidos/filtros.
+- Identifique no cabeçalho ou dados do cliente o VEÍCULO (marca, modelo, ano, motor) e PLACA, se houver.
+- Preserve os códigos alfanuméricos exatamente como constam no documento, sem remover letras ou trocar dígitos.`;
 
 const RESPONSE_SCHEMA: ResponseSchema = {
   type: SchemaType.OBJECT,
@@ -159,36 +159,42 @@ const RESPONSE_SCHEMA: ResponseSchema = {
     veiculo: {
       type: SchemaType.STRING,
       nullable: true,
-      description: "Veículo informado no orçamento ou cotação, se houver",
+      description: "Veículo informado no orçamento ou cotação, se houver (ex: Fiat Palio Fire 1.0 2014, Chevrolet Onix 1.0 2019)",
+    },
+    placa: {
+      type: SchemaType.STRING,
+      nullable: true,
+      description: "Placa do veículo, se constar",
     },
     pecas: {
       type: SchemaType.ARRAY,
-      description: "Lista de peças identificadas na foto ou texto do orçamento",
+      description: "Lista de autopeças identificadas no orçamento (sem mão de obra)",
       items: {
         type: SchemaType.OBJECT,
         properties: {
           codigo: {
             type: SchemaType.STRING,
             nullable: true,
-            description: "Código alfanumérico / Part Number do fabricante (ou 'S/ CÓDIGO' se não houver)",
+            description: "Código do fabricante / Part Number se constar expressamente, ou null",
           },
           marca: {
             type: SchemaType.STRING,
             nullable: true,
-            description: "Fabricante da peça (ex: Cofap, Cobreq, Contitech, NGK, Tecfil, Fremax, Bosch, LuK)",
+            description: "Fabricante da peça, se informado",
           },
           nome: {
             type: SchemaType.STRING,
-            description: "Descrição da peça (ex: Amortecedor Dianteiro, Pastilha Dianteira, Kit Correia Dentada)",
+            description: "Descrição técnica da peça (ex: Amortecedor Dianteiro, Disco de Freio Dianteiro)",
           },
           preco_fornecedor: {
             type: SchemaType.NUMBER,
             nullable: true,
-            description: "Preço unitário cobrado pelo fornecedor em R$, se informado",
+            description: "Preço unitário cobrado no orçamento em R$, se informado",
           },
           preco_mercado_livre_estimado: {
             type: SchemaType.NUMBER,
-            description: "Preço competitivo real no Mercado Livre Brasil em R$ (nunca igual ao preco_fornecedor)",
+            nullable: true,
+            description: "Preço estimado de mercado no Brasil se conhecido, ou null",
           },
           quantidade: {
             type: SchemaType.NUMBER,
@@ -196,7 +202,7 @@ const RESPONSE_SCHEMA: ResponseSchema = {
             description: "Quantidade cotada",
           },
         },
-        required: ["nome", "preco_mercado_livre_estimado"],
+        required: ["nome"],
       },
     },
   },
@@ -729,6 +735,12 @@ function filtrarResultadoRelevanteML(
     }
   }
 
+  // REGRA CRÍTICA: Se foi informado um código de peça (Part Number), NUNCA retorne um produto que não contenha esse código!
+  // Retornar um item aleatório de outro carro com outro código era a causa do erro reportado pelo usuário.
+  if (temCodigo) {
+    return null;
+  }
+
   // Prioridade 2: Contém a marca informada no orçamento E respeita a palavra-chave/categoria da peça
   for (const item of top5) {
     if (contemMarca(item) && contemPrimeiraPalavraDescricao(item) && !categoriaConflitante(item)) {
@@ -947,107 +959,75 @@ async function consultarMercadoLivreSearch(
     }
   } catch {}
 
-  if (candidates.length === 0) {
-    const queryTokens = normalizarTexto(qClean)
-      .split(/\s+/)
-      .filter((t) => t.length >= 2);
-    const queryAlphaNum = qClean.toUpperCase().replace(/[^A-Z0-9]/g, "");
-
-    if (queryTokens.length > 0) {
-      const scoredLocal: { item: CatalogoDiretoItem; score: number }[] = [];
-      for (const item of CATALOGO_ML_DIRETO) {
-        if (!item.price || item.price <= 0 || !item.url) continue;
-        const itemTextNorm = normalizarTexto(
-          `${item.title} ${item.brand || ""} ${(item.codes || []).join(" ")}`
-        );
-        const itemAlphaNum = `${item.title} ${(item.codes || []).join(" ")}`
-          .toUpperCase()
-          .replace(/[^A-Z0-9]/g, "");
-
-        let score = 0;
-        if (queryAlphaNum.length >= 4 && itemAlphaNum.includes(queryAlphaNum)) {
-          score += 50;
-        }
-        for (const tk of queryTokens) {
-          const tkAlpha = tk.toUpperCase().replace(/[^A-Z0-9]/g, "");
-          if (itemTextNorm.includes(tk) || (tkAlpha.length >= 3 && itemAlphaNum.includes(tkAlpha))) {
-            score += 10;
-          }
-        }
-        if (score >= 20 || (queryTokens.length === 1 && score >= 10)) {
-          scoredLocal.push({ item, score });
-        }
-      }
-
-      scoredLocal.sort((a, b) => b.score - a.score);
-      for (const { item } of scoredLocal.slice(0, 5)) {
-        const attrs: MLSearchAttribute[] = [];
-        if (item.brand) {
-          attrs.push({ id: "BRAND", name: "Marca", value_name: item.brand });
-        }
-        if (Array.isArray(item.codes) && item.codes.length > 0) {
-          attrs.push({ id: "PART_NUMBER", name: "Número de peça", value_name: item.codes.join(" ") });
-        }
-        candidates.push({
-          title: item.title,
-          price: item.price,
-          thumbnail: normalizarThumbnailML(item.img),
-          permalink: item.url,
-          attributes: attrs,
-        });
-      }
-    }
-  }
-
   return candidates.slice(0, 8);
 }
 
+function normalizarCodigoPeca(str?: string | null): string {
+  if (!str) return "";
+  return str.toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
+function itemContemCodigoExato(
+  item: { title?: string; codes?: string[]; url?: string },
+  codLimpo: string
+): boolean {
+  const alvoLimpo = normalizarCodigoPeca(codLimpo);
+  if (!alvoLimpo || alvoLimpo.length < 2) return false;
+
+  // 1. Checa array codes com quebra de similares (ex: "HF38 - SIMILARES: BD0178 / ...")
+  if (Array.isArray(item.codes)) {
+    for (const c of item.codes) {
+      if (!c) continue;
+      const partes = c.toUpperCase().split(/[\s\/\-,;:|]+/);
+      for (const p of partes) {
+        if (normalizarCodigoPeca(p) === alvoLimpo) return true;
+      }
+      if (normalizarCodigoPeca(c) === alvoLimpo) return true;
+    }
+  }
+
+  // 2. Checa no título com limite de palavra alfanumérica
+  const titLimpo = (item.title || "").toUpperCase().replace(/[^A-Z0-9]/gi, " ");
+  const rxTit = new RegExp(`(^|\\s)${alvoLimpo}(\\s|$)`, "i");
+  if (rxTit.test(titLimpo)) return true;
+
+  // 3. Checa na URL
+  const urlLimpa = (item.url || "").toUpperCase();
+  if (urlLimpa.includes(alvoLimpo)) return true;
+
+  return false;
+}
+
 /**
- * Busca prioritária apenas por código exato em `CATALOGO_ML_DIRETO` e `produtos_afiliados` (Supabase).
- * NUNCA faz chute genérico por palavras soltas para evitar retornar peças de outra marca/categoria.
+ * Busca prioritária estrita por código exato em `CATALOGO_ML_DIRETO` e `produtos_afiliados` (Supabase).
+ * Garante que se o usuário digitou o código de uma peça, retorne EXATAMENTE aquela peça e nunca de outro carro.
  */
 async function buscarProdutoCodigoExatoLocal(
   codigo: string,
   marca: string,
-  descricao: string
+  descricao: string,
+  veiculoAlvo?: string | null
 ): Promise<MLItemResultado | null> {
   const codLimpo = (codigo || "").trim().toUpperCase();
-  const codSemTraco = codLimpo.replace(/[^A-Z0-9]/g, "");
-  const temCodigo = Boolean(codLimpo && codLimpo !== "S/ CÓDIGO" && codSemTraco.length >= 3);
+  const alvoLimpo = normalizarCodigoPeca(codLimpo);
+  const temCodigo = Boolean(codLimpo && codLimpo !== "S/ CÓDIGO" && alvoLimpo.length >= 2);
   if (!temCodigo) return null;
 
   // 1. Consulta por código exato em `CATALOGO_ML_DIRETO`
-  const exactMatches = CATALOGO_ML_DIRETO.filter((item) => {
-    if (!item.price || item.price <= 0 || !item.url) return false;
-    if (Array.isArray(item.codes)) {
-      for (const c of item.codes) {
-        const cClean = c.toUpperCase().replace(/[^A-Z0-9]/g, "");
-        if (cClean === codSemTraco || c.toUpperCase() === codLimpo) return true;
+  for (const item of CATALOGO_ML_DIRETO) {
+    if (!item.price || item.price <= 0 || !item.url) continue;
+
+    if (itemContemCodigoExato(item, codLimpo)) {
+      // Se veículo alvo foi informado, valida para não associar se o título for explicitamente de montadora/carro concorrente
+      if (veiculoAlvo && !validarTituloML(item.title, veiculoAlvo, descricao, codLimpo).valido) {
+        continue;
       }
-    }
-    return validarCodigoNoTitulo(item.title, codLimpo);
-  });
 
-  if (exactMatches.length > 0) {
-    const validados = filtrarResultadoRelevanteML(
-      exactMatches.map((m) => ({
-        title: m.title,
-        price: m.price,
-        thumbnail: normalizarThumbnailML(m.img),
-        permalink: m.url,
-        attributes: m.brand ? [{ id: "BRAND", value_name: m.brand }] : [],
-      })),
-      codLimpo,
-      marca,
-      descricao
-    );
-
-    if (validados) {
       return {
-        titulo: validados.title,
-        preco: validados.price,
-        imagem: validados.thumbnail,
-        linkAfiliado: formatarLinkAfiliado(validados.permalink),
+        titulo: item.title,
+        preco: item.price,
+        imagem: normalizarThumbnailML(item.img),
+        linkAfiliado: formatarLinkAfiliado(item.url),
         encontrado: true,
       };
     }
@@ -1060,33 +1040,40 @@ async function buscarProdutoCodigoExatoLocal(
       const { data } = await supabase
         .from("produtos_afiliados")
         .select("titulo, codigo_fabricante, codigo_oem, marca, preco_estimado, especificacoes, imagem_url, link_afiliado")
-        .or(`codigo_fabricante.ilike.%${codLimpo}%,codigo_oem.ilike.%${codLimpo}%,titulo.ilike.%${codLimpo}%,codigo_fabricante.ilike.%${codSemTraco}%`)
-        .limit(5);
+        .or(`codigo_fabricante.ilike.%${codLimpo}%,codigo_oem.ilike.%${codLimpo}%,titulo.ilike.%${codLimpo}%,codigo_fabricante.ilike.%${alvoLimpo}%`)
+        .limit(10);
 
       if (data && data.length > 0) {
-        const match = data.find((p) =>
-          validarCodigoNoTitulo(`${p.codigo_fabricante || ""} ${p.codigo_oem || ""} ${p.titulo || ""}`, codLimpo)
-        );
+        for (const p of data) {
+          const titLimpo = normalizarCodigoPeca(p.titulo);
+          const fabLimpo = normalizarCodigoPeca(p.codigo_fabricante);
+          const oemLimpo = normalizarCodigoPeca(p.codigo_oem);
 
-        if (match) {
-          const precoNum =
-            parseBrlStringToNumber(match.preco_estimado) ||
-            parseBrlStringToNumber((match.especificacoes as any)?.preco);
+          const match = fabLimpo.includes(alvoLimpo) || oemLimpo.includes(alvoLimpo) || titLimpo.includes(alvoLimpo);
+          if (match) {
+            if (veiculoAlvo && !validarTituloML(p.titulo, veiculoAlvo, descricao, codLimpo).valido) {
+              continue;
+            }
 
-          const link =
-            (match.especificacoes as any)?.direct_product_url ||
-            match.link_afiliado ||
-            (match.especificacoes as any)?.link_afiliado ||
-            (match.especificacoes as any)?.link_ml;
+            const precoNum =
+              parseBrlStringToNumber(p.preco_estimado) ||
+              parseBrlStringToNumber((p.especificacoes as any)?.preco);
 
-          if (precoNum && precoNum > 0 && link) {
-            return {
-              titulo: match.titulo,
-              preco: precoNum,
-              imagem: normalizarThumbnailML(match.imagem_url),
-              linkAfiliado: formatarLinkAfiliado(link),
-              encontrado: true,
-            };
+            const link =
+              (p.especificacoes as any)?.direct_product_url ||
+              p.link_afiliado ||
+              (p.especificacoes as any)?.link_afiliado ||
+              (p.especificacoes as any)?.link_ml;
+
+            if (precoNum && precoNum > 0 && link) {
+              return {
+                titulo: p.titulo,
+                preco: precoNum,
+                imagem: normalizarThumbnailML(p.imagem_url),
+                linkAfiliado: formatarLinkAfiliado(link),
+                encontrado: true,
+              };
+            }
           }
         }
       }
@@ -1099,48 +1086,47 @@ async function buscarProdutoCodigoExatoLocal(
 }
 
 /**
- * Estratégia de Busca em Cascata (Multi-Step Fallback) no Mercado Livre:
- * - Tentativa 1 (Busca Precisa): `{marca} {codigo}` (Ex: "SABO 04431ROL", "FRAS-LE TY327CPA", "FREMAX BD4212")
- * - Tentativa 2 (Código Formatado/Separado): `{marca} {codigo_separado}` (Ex: "FREMAX BD 4212", "FRAS-LE TY 327 CPA")
- * - Tentativa 3 (Código + Nome da Peça): `{codigo} {primeiras_duas_palavras_da_descricao}` (Ex: "04431ROL Suporte Cardan")
- * - Tentativa 4 (Apenas o Código Puro): `{codigo}`
+ * Estratégia de Busca em Cascata no Mercado Livre:
+ * - Quando há código, busca PRIORITARIAMENTE e EXCLUSIVAMENTE anúncios que contenham aquele código.
+ * - Se não encontrar na API com o código exato, NÃO substitui por peça de outro carro.
+ *   Gera o link direto oficial de busca com o código exato para compra transparente.
  */
 async function buscarAnuncioPorCodigo(
   codigo: string,
   marca: string,
   nome: string,
-  _veiculo?: string | null,
+  veiculo?: string | null,
   _precoFornecedor?: number | null,
   signal?: AbortSignal
 ): Promise<MLItemResultado> {
   const codLimpo = (codigo || "").trim().toUpperCase();
-  const temCodigo = Boolean(codLimpo && codLimpo !== "S/ CÓDIGO");
+  const alvoLimpo = normalizarCodigoPeca(codLimpo);
+  const temCodigo = Boolean(codLimpo && codLimpo !== "S/ CÓDIGO" && alvoLimpo.length >= 2);
   const marcaLimpa =
     marca && !["original", "s/ marca", "generico"].includes(normalizarTexto(marca))
       ? marca.trim()
       : "";
   const nomeLimpo = (nome || "").trim();
 
-  // URL de busca direta honesta para fallback caso nenhuma tentativa encontre
-  const termoFallbackDireto = `${marcaLimpa ? `${marcaLimpa} ` : ""}${temCodigo ? codLimpo : nomeLimpo}`.trim() || "Peca Automotiva";
-  const urlBuscaDiretaFallback = `https://lista.mercadolivre.com.br/${encodeURIComponent(termoFallbackDireto)}`;
+  // URL de busca direta honesta no Mercado Livre
+  const termoFallbackDireto = temCodigo
+    ? `${marcaLimpa ? `${marcaLimpa} ` : ""}${codLimpo}`.trim()
+    : `${marcaLimpa ? `${marcaLimpa} ` : ""}${nomeLimpo} ${veiculo || ""}`.trim();
+  const urlBuscaDiretaFallback = `https://lista.mercadolivre.com.br/${encodeURIComponent(termoFallbackDireto || "Peca Automotiva")}`;
   const fallbackLink = formatarLinkAfiliado(urlBuscaDiretaFallback);
 
-  // 0. Verifica se o código exato já consta no catálogo local/Supabase validado
-  const itemExatoLocal = await buscarProdutoCodigoExatoLocal(codLimpo, marcaLimpa, nomeLimpo);
-  if (itemExatoLocal && itemExatoLocal.preco && itemExatoLocal.preco > 0 && itemExatoLocal.linkAfiliado) {
-    return itemExatoLocal;
+  // 0. Verifica se o código exato já consta no catálogo local ou Supabase validado
+  if (temCodigo) {
+    const itemExatoLocal = await buscarProdutoCodigoExatoLocal(codLimpo, marcaLimpa, nomeLimpo, veiculo);
+    if (itemExatoLocal && itemExatoLocal.preco && itemExatoLocal.preco > 0 && itemExatoLocal.linkAfiliado) {
+      return itemExatoLocal;
+    }
   }
 
   const codigoSeparado = temCodigo ? separarLetrasNumerosCodigo(codLimpo) : "";
   const duasPalavras = extrairPrimeirasDuasPalavrasDescricao(nomeLimpo);
-  const duasPalavrasBrutas = nomeLimpo
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .join(" ");
 
-  // Monta a fila de tentativas da cascata evitando queries duplicadas
+  // Monta a fila de tentativas
   const queriesCascata: string[] = [];
   const addQuery = (q: string) => {
     const clean = q.replace(/\s+/g, " ").trim();
@@ -1150,46 +1136,33 @@ async function buscarAnuncioPorCodigo(
   };
 
   if (temCodigo) {
-    // Tentativa 1 (Busca Precisa): {marca} {codigo}
+    // Quando HÁ CÓDIGO: todas as buscas contêm obrigatoriamente o código
     if (marcaLimpa) {
       addQuery(`${marcaLimpa} ${codLimpo}`);
-    } else {
-      addQuery(codLimpo);
     }
+    addQuery(codLimpo);
 
-    // Tentativa 2 (Código Formatado/Separado): {marca} {codigo_separado}
     if (codigoSeparado && codigoSeparado.toLowerCase() !== codLimpo.toLowerCase()) {
-      if (marcaLimpa) {
-        addQuery(`${marcaLimpa} ${codigoSeparado}`);
-      } else {
-        addQuery(codigoSeparado);
-      }
+      if (marcaLimpa) addQuery(`${marcaLimpa} ${codigoSeparado}`);
+      addQuery(codigoSeparado);
     }
 
-    // Tentativa 3 (Código + Nome da Peça): {codigo} {primeiras_duas_palavras_da_descricao}
     if (duasPalavras) {
       addQuery(`${codLimpo} ${duasPalavras}`);
     }
-    if (duasPalavrasBrutas && duasPalavrasBrutas.toLowerCase() !== duasPalavras.toLowerCase()) {
-      addQuery(`${codLimpo} ${duasPalavrasBrutas}`);
-    }
-    if (codigoSeparado && duasPalavras && codigoSeparado.toLowerCase() !== codLimpo.toLowerCase()) {
-      addQuery(`${codigoSeparado} ${duasPalavras}`);
-    }
-
-    // Tentativa 4 (Apenas o Código Puro): {codigo}
-    addQuery(codLimpo);
-
-    // Tentativa adicional caso o vendedor tenha cadastrado pela Marca + Nome da Peça
-    if (marcaLimpa && duasPalavras) {
-      addQuery(`${marcaLimpa} ${duasPalavras}`);
-    }
   } else {
-    if (marcaLimpa && duasPalavras) {
-      addQuery(`${marcaLimpa} ${duasPalavras}`);
+    // Quando NÃO HÁ CÓDIGO: busca combinando marca + nome da peça + veículo para não puxar carro errado
+    if (marcaLimpa && duasPalavras && veiculo) {
+      addQuery(`${marcaLimpa} ${duasPalavras} ${veiculo}`);
+    }
+    if (duasPalavras && veiculo) {
+      addQuery(`${duasPalavras} ${veiculo}`);
+    }
+    if (marcaLimpa && nomeLimpo) {
+      addQuery(`${marcaLimpa} ${nomeLimpo}`);
     }
     if (nomeLimpo) {
-      addQuery(`${marcaLimpa} ${nomeLimpo}`);
+      addQuery(nomeLimpo);
     }
   }
 
@@ -1205,6 +1178,11 @@ async function buscarAnuncioPorCodigo(
 
     const itemValidado = filtrarResultadoRelevanteML(results, codLimpo, marcaLimpa, nomeLimpo);
     if (itemValidado && itemValidado.price > 0 && itemValidado.permalink) {
+      // Se tiver veículo informado, checa compatibilidade do anúncio
+      if (veiculo && !validarTituloML(itemValidado.title, veiculo, nomeLimpo, codLimpo).valido) {
+        continue;
+      }
+
       return {
         titulo: itemValidado.title,
         preco: itemValidado.price,
@@ -1229,9 +1207,10 @@ async function buscarAnuncioPorCodigo(
 // ============================================================================
 function normalizarMimeTypeImagem(rawType?: string | null, dataUri?: string | null): string {
   if (dataUri) {
-    const match = dataUri.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,/i);
+    const match = dataUri.match(/^data:([a-zA-Z0-9.+-]+\/[a-zA-Z0-9.+-]+);base64,/i);
     if (match && match[1]) {
       const m = match[1].toLowerCase();
+      if (m === "application/pdf") return "application/pdf";
       if (m === "image/jpg") return "image/jpeg";
       if (["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"].includes(m)) {
         return m;
@@ -1239,6 +1218,7 @@ function normalizarMimeTypeImagem(rawType?: string | null, dataUri?: string | nu
     }
   }
   const clean = (rawType || "").toLowerCase().trim();
+  if (clean === "application/pdf") return "application/pdf";
   if (clean === "image/jpg") return "image/jpeg";
   if (["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"].includes(clean)) {
     return clean;
@@ -1324,7 +1304,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         {
           success: false,
-          error: "Envie uma foto/print do orçamento do fornecedor ou cole a lista de peças com códigos.",
+          error: "Envie uma foto/print/PDF do orçamento do fornecedor ou cole a lista de peças com códigos.",
         },
         { status: 400 }
       );
@@ -1336,6 +1316,7 @@ export async function POST(request: NextRequest) {
 
     let parsedData: {
       veiculo?: string | null;
+      placa?: string | null;
       pecas: Array<{
         codigo?: string | null;
         marca?: string | null;
@@ -1353,7 +1334,7 @@ export async function POST(request: NextRequest) {
       if (imagemBase64) {
         const mimeType = normalizarMimeTypeImagem(null, imagemBase64);
         const cleanBase64 = imagemBase64
-          .replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/i, "")
+          .replace(/^data:[a-zA-Z0-9.+-]+\/[a-zA-Z0-9.+-]+;base64,/i, "")
           .replace(/\s+/g, "");
         promptParts.push({
           inlineData: {
@@ -1363,8 +1344,8 @@ export async function POST(request: NextRequest) {
         });
         promptParts.push(
           temTexto
-            ? `Foto/print de orçamento de autopeças anexada. Observações do usuário:\n"""\n${texto}\n"""\n\nExtraia todas as peças visíveis na imagem e no texto em JSON no formato {"veiculo": string|null, "pecas": [{"codigo": string, "marca": string, "nome": string, "preco_fornecedor": number|null, "preco_mercado_livre_estimado": number, "quantidade": number}]}.`
-            : `Foto/print de orçamento de autopeças anexada. Leia atentamente todas as linhas da imagem e extraia todas as peças em JSON no formato {"veiculo": string|null, "pecas": [{"codigo": string, "marca": string, "nome": string, "preco_fornecedor": number|null, "preco_mercado_livre_estimado": number, "quantidade": number}]}.`
+            ? `Orçamento / cotação de autopeças anexado (${mimeType === "application/pdf" ? "documento PDF" : "Foto/Print"}). Observações adicionais:\n"""\n${texto}\n"""\n\nExtraia todas as autopeças (códigos de fábrica, marcas, nomes, quantidades e preços unitários) e os dados do veículo em formato JSON seguindo as instruções.`
+            : `Orçamento / cotação de autopeças anexado (${mimeType === "application/pdf" ? "documento PDF" : "Foto/Print"}). Leia atentamente todas as linhas, tabelas e colunas do documento, extraindo todas as autopeças (códigos de fábrica, marcas, nomes, quantidades e preços unitários) e o veículo em formato JSON seguindo as instruções.`
         );
       } else if (temImagem && imagem) {
         const buffer = Buffer.from(await imagem.arrayBuffer());
@@ -1380,17 +1361,17 @@ export async function POST(request: NextRequest) {
 
         promptParts.push(
           temTexto
-            ? `Foto/print de orçamento de autopeças anexada. Observações do usuário:\n"""\n${texto}\n"""\n\nExtraia todas as peças visíveis na imagem e no texto em JSON no formato {"veiculo": string|null, "pecas": [{"codigo": string, "marca": string, "nome": string, "preco_fornecedor": number|null, "preco_mercado_livre_estimado": number, "quantidade": number}]}.`
-            : `Foto/print de orçamento de autopeças anexada. Leia atentamente todas as linhas da imagem e extraia todas as peças em JSON no formato {"veiculo": string|null, "pecas": [{"codigo": string, "marca": string, "nome": string, "preco_fornecedor": number|null, "preco_mercado_livre_estimado": number, "quantidade": number}]}.`
+            ? `Orçamento / cotação de autopeças anexado (${mimeType === "application/pdf" ? "documento PDF" : "Foto/Print"}). Observações adicionais:\n"""\n${texto}\n"""\n\nExtraia todas as autopeças e o veículo em formato JSON seguindo as instruções.`
+            : `Orçamento / cotação de autopeças anexado (${mimeType === "application/pdf" ? "documento PDF" : "Foto/Print"}). Leia atentamente todas as linhas, tabelas e colunas, extraindo todas as autopeças e o veículo em formato JSON seguindo as instruções.`
         );
       } else if (temTexto && texto) {
         promptParts.push(
-          `Cotação / lista de peças de fornecedor:\n"""\n${texto}\n"""\n\nExtraia os códigos dos fabricantes (Part Numbers), marcas, descrições, preços de fornecedor e preços estimados de mercado no Mercado Livre Brasil conforme as diretrizes.`
+          `Cotação / lista de autopeças:\n"""\n${texto}\n"""\n\nExtraia os códigos dos fabricantes (Part Numbers), marcas, descrições, quantidades e preços unitários em formato JSON conforme as instruções.`
         );
       }
 
       for (const candidateModel of MODEL_CANDIDATES) {
-        // Tentativa 1: com responseSchema estruturado; Tentativa 2 (se imagem): JSON livre sem responseSchema restrito
+        // Tentativa 1: com responseSchema estruturado; Tentativa 2: JSON puro
         const configs = [
           {
             responseMimeType: "application/json",
@@ -1429,7 +1410,18 @@ export async function POST(request: NextRequest) {
               .replace(/^```\s*/i, "")
               .replace(/\s*```$/i, "");
 
-            const parsed = JSON.parse(cleanJson);
+            let parsed: any = null;
+            try {
+              parsed = JSON.parse(cleanJson);
+            } catch {
+              const matchJson = cleanJson.match(/\{[\s\S]*\}/);
+              if (matchJson) {
+                try {
+                  parsed = JSON.parse(matchJson[0]);
+                } catch {}
+              }
+            }
+
             const rawList = Array.isArray(parsed?.pecas)
               ? parsed.pecas
               : Array.isArray(parsed?.itens)
@@ -1443,9 +1435,14 @@ export async function POST(request: NextRequest) {
             if (rawList.length > 0) {
               parsedData = {
                 veiculo: parsed?.veiculo || "Orçamento de Fornecedor",
+                placa: parsed?.placa || null,
                 pecas: rawList.map((p: any) => ({
-                  codigo: p.codigo || p.part_number || p.referencia || "S/ CÓDIGO",
-                  marca: p.marca || p.fabricante || "Original",
+                  codigo: p.codigo && String(p.codigo).trim().length > 0 && !["null", "undefined", "s/ codigo"].includes(String(p.codigo).trim().toLowerCase())
+                    ? String(p.codigo).trim()
+                    : "S/ CÓDIGO",
+                  marca: p.marca && String(p.marca).trim().length > 0 && !["null", "undefined"].includes(String(p.marca).trim().toLowerCase())
+                    ? String(p.marca).trim()
+                    : "Original",
                   nome: p.nome || p.descricao || p.peca || p.titulo || "Peça Automotiva",
                   preco_fornecedor:
                     typeof p.preco_fornecedor === "number"

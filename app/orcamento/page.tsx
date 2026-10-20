@@ -266,19 +266,25 @@ function gerarTextoFornecedores(
 
 function comprimirImagemParaJpegBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
+    const isPdf = file.type === "application/pdf" || /\.pdf$/i.test(file.name || "");
     const reader = new FileReader();
-    reader.onerror = () => reject(new Error("Erro ao ler o arquivo de imagem."));
+    reader.onerror = () => reject(new Error("Erro ao ler o arquivo selecionado."));
     reader.onload = (ev) => {
       const dataUrl = ev.target?.result as string;
       if (!dataUrl) {
-        reject(new Error("Imagem vazia."));
+        reject(new Error("Arquivo vazio."));
+        return;
+      }
+      // Se for PDF, envia diretamente como data URL com mime-type application/pdf (Gemini Vision nativo)
+      if (isPdf) {
+        resolve(dataUrl);
         return;
       }
       const img = new window.Image();
       img.onerror = () => resolve(dataUrl);
       img.onload = () => {
         try {
-          const maxDim = 1600;
+          const maxDim = 2048; // Aumentado para 2048px para preservar códigos e fontes pequenas em fotos/prints
           let width = img.width || 1200;
           let height = img.height || 1200;
           if (width > maxDim || height > maxDim) {
@@ -302,7 +308,7 @@ function comprimirImagemParaJpegBase64(file: File): Promise<string> {
           ctx.fillStyle = "#FFFFFF";
           ctx.fillRect(0, 0, width, height);
           ctx.drawImage(img, 0, 0, width, height);
-          const compressed = canvas.toDataURL("image/jpeg", 0.85);
+          const compressed = canvas.toDataURL("image/jpeg", 0.90);
           resolve(compressed);
         } catch {
           resolve(dataUrl);
@@ -336,20 +342,23 @@ export default function OrcamentoPage() {
   const cameraInputRef = useRef<HTMLInputElement | null>(null);
 
   const handleFileSelect = async (file: File) => {
+    const isPdf =
+      file.type === "application/pdf" || /\.pdf$/i.test(file.name || "");
     const isImage =
       file.type.startsWith("image/") ||
       /\.(jpe?g|png|webp|heic|heif|bmp)$/i.test(file.name || "");
-    if (!isImage) {
-      setErro("Por favor, selecione um arquivo de imagem válido (.jpg, .png, .webp).");
+
+    if (!isImage && !isPdf) {
+      setErro("Por favor, selecione um arquivo de imagem (.jpg, .png, .webp) ou documento PDF.");
       return;
     }
     setImagem(file);
     setErro(null);
 
     try {
-      const jpegDataUrl = await comprimirImagemParaJpegBase64(file);
-      setImagemPreview(jpegDataUrl);
-      setImagemBase64(jpegDataUrl);
+      const fileDataUrl = await comprimirImagemParaJpegBase64(file);
+      setImagemPreview(fileDataUrl);
+      setImagemBase64(fileDataUrl);
     } catch {
       const reader = new FileReader();
       reader.onload = (e) => {
@@ -667,13 +676,23 @@ export default function OrcamentoPage() {
                 >
                   {imagemPreview ? (
                     <div className="space-y-3 w-full">
-                      <div className="relative w-36 h-36 mx-auto rounded-xl overflow-hidden border border-zinc-200 dark:border-zinc-700 shadow-md">
-                        {/* eslint-disable-next-line @next/next/no-img-element */}
-                        <img
-                          src={imagemPreview}
-                          alt="Pré-visualização do orçamento"
-                          className="w-full h-full object-cover"
-                        />
+                      <div className="relative w-36 h-36 mx-auto rounded-xl overflow-hidden border border-zinc-200 dark:border-zinc-700 shadow-md bg-zinc-100 dark:bg-zinc-800 flex items-center justify-center">
+                        {imagem?.type === "application/pdf" || imagem?.name?.toLowerCase().endsWith(".pdf") ? (
+                          <div className="flex flex-col items-center justify-center p-2 text-center">
+                            <FileText className="w-12 h-12 text-red-500 mb-1" />
+                            <span className="text-[10px] font-semibold text-zinc-700 dark:text-zinc-300 line-clamp-2 px-1">
+                              {imagem.name}
+                            </span>
+                            <span className="text-[9px] text-zinc-400 mt-0.5">Documento PDF</span>
+                          </div>
+                        ) : (
+                          /* eslint-disable-next-line @next/next/no-img-element */
+                          <img
+                            src={imagemPreview}
+                            alt="Pré-visualização do orçamento"
+                            className="w-full h-full object-cover"
+                          />
+                        )}
                         <button
                           type="button"
                           onClick={(e) => {
@@ -681,14 +700,18 @@ export default function OrcamentoPage() {
                             handleClearImage();
                           }}
                           className="absolute top-1.5 right-1.5 p-1 rounded-full bg-zinc-900/80 text-white hover:bg-red-600 transition"
-                          title="Remover foto"
+                          title="Remover arquivo"
                         >
                           <X className="w-3.5 h-3.5" />
                         </button>
                       </div>
                       <div className="text-xs font-medium text-emerald-600 dark:text-emerald-400 flex items-center justify-center gap-1">
                         <CheckCircle2 className="w-3.5 h-3.5" />
-                        <span>Foto / Print anexado ({imagem?.name || "Imagem colada"})</span>
+                        <span>
+                          {imagem?.type === "application/pdf" || imagem?.name?.toLowerCase().endsWith(".pdf")
+                            ? `Documento PDF anexado (${imagem?.name})`
+                            : `Foto / Print anexado (${imagem?.name || "Imagem colada"})`}
+                        </span>
                       </div>
                     </div>
                   ) : (
@@ -698,10 +721,10 @@ export default function OrcamentoPage() {
                       </div>
                       <div className="space-y-1">
                         <p className="text-xs sm:text-sm font-semibold text-zinc-700 dark:text-zinc-300">
-                          Arraste o print, cole (Ctrl+V) ou clique para escolher
+                          Arraste o orçamento, cole (Ctrl+V) ou clique para escolher
                         </p>
                         <p className="text-[11px] text-zinc-400">
-                          Print do WhatsApp, tela do sistema ou papel de orçamento (JPG, PNG)
+                          Print do WhatsApp, foto do papel ou documento PDF (JPG, PNG, PDF)
                         </p>
                       </div>
 
@@ -714,7 +737,7 @@ export default function OrcamentoPage() {
                           }}
                           className="px-3 py-1.5 rounded-lg text-xs font-bold bg-zinc-200 dark:bg-zinc-800 text-zinc-800 dark:text-zinc-200 hover:bg-zinc-300 dark:hover:bg-zinc-700 transition cursor-pointer"
                         >
-                          Arquivo
+                          Arquivo / PDF
                         </button>
                         <button
                           type="button"
@@ -734,7 +757,7 @@ export default function OrcamentoPage() {
                   <input
                     ref={fileInputRef}
                     type="file"
-                    accept="image/*"
+                    accept="image/*,application/pdf,.pdf"
                     className="hidden"
                     onChange={(e) => {
                       if (e.target.files && e.target.files[0]) {
